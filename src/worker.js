@@ -82,7 +82,7 @@ export default {
         }
         
         // Use base64 encoding for the domain name
-        const domainRoot = env.DOMAIN_ROOT || 'copernicusone.com';
+        const domainRoot = env.DOMAIN_ROOT || 'mcp.copernicusone.com';
         const encoded = toBase64Url(domainOnly);
         const domain_url = `https://${encoded}.${domainRoot}/`;
         
@@ -679,7 +679,7 @@ function escapeHtml(unsafe) {
 function landingHTML(url, env) {
   const origin = url.origin;
   const example = 'mcp.atlassian.com';
-  const domainRoot = (env && env.DOMAIN_ROOT) || 'copernicusone.com';
+  const domainRoot = (env && env.DOMAIN_ROOT) || 'mcp.copernicusone.com';
   const targetParam = url.searchParams.get('url') || '';
   let preRendered = '';
   if (targetParam) {

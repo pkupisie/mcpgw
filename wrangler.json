@@ -6,6 +6,6 @@
   "vars": {
     "ALLOW_PROTOCOLS": "https:,wss:",
     "LOG_LEVEL": "debug",
-    "DOMAIN_ROOT": "copernicusone.com"
+    "DOMAIN_ROOT": "mcp.copernicusone.com"
   }
 }
