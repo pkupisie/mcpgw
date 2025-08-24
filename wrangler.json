@@ -1,7 +1,10 @@
 {
   "name": "mcp-oauth-gateway",
+  "compatibility_date": "2025-08-18",
   "main": "dist/worker.js",
-  "compatibility_date": "2024-08-01",
+  "build": {
+    "command": "npm run build:worker"
+  },
   "observability": { "enabled": true },
   "vars": {
     "DOMAIN_ROOT": "copernicusone.com",
