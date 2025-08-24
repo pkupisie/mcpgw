@@ -609,7 +609,11 @@ async function handleProtectedResourceMetadata(request: Request, hostRoute: MCPR
     // MCP-specific metadata
     mcp_version: '1.0',
     upstream_server: hostRoute.serverDomain,
-    capabilities: ['tools', 'resources', 'prompts']
+    capabilities: ['tools', 'resources', 'prompts'],
+    
+    // Server identification for Claude
+    server_name: `${hostRoute.serverDomain} (via MCP Gateway)`,
+    description: `MCP OAuth Gateway proxying requests to ${hostRoute.serverDomain}`
   };
   
   return new Response(JSON.stringify(metadata, null, 2), {
