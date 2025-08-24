@@ -36,9 +36,11 @@ export default {
             message: 'MCP MITM proxy is up',
             usage: 'GET/POST/WS: /<base64url-encoded-full-upstream-url>',
             example: '/aHR0cHM6Ly9tY3AuYXRsYXNzaWFuLmNvbS92MS9zc2U',
+            domain_root: env.DOMAIN_ROOT || 'mcp.copernicusone.com',
+            domain_usage: 'https://b32-<base32(url)>.{domain_root}/',
           });
         }
-        const resp = landingHTML(url);
+        const resp = landingHTML(url, env);
         log(rid, 'debug', 'route:landing', {}, lvl);
         return resp;
       }
@@ -48,7 +50,12 @@ export default {
         let encoded = '';
         try { encoded = toBase64Url(target); } catch (e) { return badRequest('Invalid URL input'); }
         const worker = `${url.origin}/${encoded}`;
-        const resp = json({ original: target, encoded, worker_url: worker });
+        // Domain-encoded host output
+        const domainRoot = env.DOMAIN_ROOT || 'mcp.copernicusone.com';
+        const b32 = base32Encode(target);
+        const host = b32ToHost(b32, domainRoot);
+        const domain_url = `https://${host}/`;
+        const resp = json({ original: target, encoded, worker_url: worker, base32: b32, domain_host: host, domain_url });
         log(rid, 'debug', 'route:encode', { target }, lvl);
         return resp;
       }
@@ -65,59 +72,28 @@ export default {
         return resp;
       }
 
-      // Default upstream mode: ignore encoded path; route based on DEFAULT_UPSTREAM (origin)
-      const defaultUpstream = env.DEFAULT_UPSTREAM || 'https://mcp.atlassian.com/';
-      let defaultURL;
-      try { defaultURL = new URL(defaultUpstream); }
-      catch { return badRequest('DEFAULT_UPSTREAM invalid'); }
-      if (!allowProtocol(defaultURL.protocol, env)) return badRequest('Upstream protocol not allowed');
-      // Route all traffic to same origin with original path
-      let upstreamURL = new URL(defaultURL.origin);
-      upstreamURL.pathname = url.pathname;
-      if (url.search) {
-        const incoming = new URLSearchParams(url.search);
-        for (const [k, v] of incoming.entries()) upstreamURL.searchParams.set(k, v);
-      }
-      log(rid, 'debug', 'route:default', {
-        upstream: redactURL(upstreamURL).toString()
-      }, lvl);
-
-      // WebSocket tunneling
-      const upgrade = request.headers.get('upgrade');
-      if (upgrade && upgrade.toLowerCase() === 'websocket') {
-        log(rid, 'info', 'ws:connect', { upstream: upstreamURL.toString() }, lvl);
-        const resp = await handleWebSocket(request, upstreamURL, env);
-        log(rid, 'info', 'ws:accepted', { upstream: upstreamURL.toString() }, lvl);
-        return resp;
+      // 1) Host-encoded routing: <b32-encoded>[.<more>].<DOMAIN_ROOT>
+      const hostRoute = parseHostEncodedUpstream(url.hostname, env);
+      if (hostRoute) {
+        const upstreamURL = selectUpstreamForRequest(hostRoute.upstreamBase, url, request);
+        log(rid, 'debug', 'route:host-encoded', {
+          host: url.hostname,
+          upstream: redactURL(upstreamURL).toString(),
+        }, lvl);
+        // WebSocket tunneling for host-encoded routing
+        const upgrade = request.headers.get('upgrade');
+        if (upgrade && upgrade.toLowerCase() === 'websocket') {
+          log(rid, 'info', 'ws:connect', { upstream: upstreamURL.toString() }, lvl);
+          const resp = await handleWebSocket(request, upstreamURL, env);
+          log(rid, 'info', 'ws:accepted', { upstream: upstreamURL.toString() }, lvl);
+          return resp;
+        }
+        return await proxyFetch(upstreamURL, request, rid, start, lvl);
       }
 
-      // Build upstream request
-      const init = await buildUpstreamInit(request, env);
-      log(rid, 'debug', 'upstream:request', {
-        method: init.method,
-        url: upstreamURL.toString(),
-        headers: redactHeadersObj(headersToObject(init.headers, 64)),
-        body_len: request.headers.get('content-length') || null,
-      }, lvl);
-      const upstreamResp = await fetch(upstreamURL.toString(), init);
-
-      // Pass-through SSE streaming (or any streaming body)
-      const contentType = upstreamResp.headers.get('content-type') || '';
-      const isSSE = contentType.includes('text/event-stream');
-      const respHeaders = filterResponseHeaders(upstreamResp.headers);
-      log(rid, 'debug', 'upstream:response', {
-        status: upstreamResp.status,
-        content_type: contentType || null,
-        sse: isSSE,
-        headers: headersToObject(respHeaders, 64),
-        elapsed_ms: Date.now() - start,
-      }, lvl);
-
-      return new Response(upstreamResp.body, {
-        status: upstreamResp.status,
-        statusText: upstreamResp.statusText,
-        headers: respHeaders,
-      });
+      // No host-encoded upstream and not a known local route
+      log(rid, 'warn', 'route:missing-upstream', { host: url.hostname, path: url.pathname }, lvl);
+      return json({ error: 'Missing host-encoded upstream', hint: 'Use the landing page to generate a base32 host under your domain root.' }, 400);
     } catch (err) {
       log(rid, 'error', 'proxy:error', { message: String(err?.message || err) }, 'debug');
       return json({ error: 'Proxy error', detail: String(err?.message || err) }, 502);
@@ -340,6 +316,125 @@ function redactURL(u) {
   }
 }
 
+// --- Host-encoded routing helpers ---
+function parseHostEncodedUpstream(hostname, env) {
+  const root = (env.DOMAIN_ROOT || 'mcp.copernicusone.com').toLowerCase();
+  const host = (hostname || '').toLowerCase();
+  if (!host.endsWith('.' + root)) return null;
+  const parts = host.split('.');
+  const rootParts = root.split('.');
+  if (parts.length <= rootParts.length) return null; // it's the root domain itself
+  const encodedLabels = parts.slice(0, parts.length - rootParts.length);
+  let joined = encodedLabels.join('');
+  if (joined.startsWith('b32-')) joined = joined.slice(4);
+  if (!joined) return null;
+  const decoded = base32Decode(joined);
+  if (!decoded) return null;
+  try {
+    const url = new URL(decoded);
+    return { upstreamBase: url };
+  } catch { return null; }
+}
+
+function selectUpstreamForRequest(upstreamBase, reqUrl, request) {
+  // Heuristic: if GET + event-stream or requesting /v1/sse, go to exact upstreamBase;
+  // otherwise, route to upstream origin + incoming path
+  const wantsSSE = request.method.toUpperCase() === 'GET' && (
+    (request.headers.get('accept') || '').includes('text/event-stream') ||
+    reqUrl.pathname === '/v1/sse' || reqUrl.pathname.endsWith('/sse')
+  );
+  if (wantsSSE) {
+    const u = new URL(upstreamBase.href);
+    // Merge query from incoming
+    if (reqUrl.search) {
+      const qs = new URLSearchParams(reqUrl.search);
+      for (const [k, v] of qs.entries()) u.searchParams.set(k, v);
+    }
+    return u;
+  }
+  const origin = new URL(upstreamBase.origin);
+  origin.pathname = reqUrl.pathname;
+  if (reqUrl.search) {
+    const qs = new URLSearchParams(reqUrl.search);
+    for (const [k, v] of qs.entries()) origin.searchParams.set(k, v);
+  }
+  return origin;
+}
+
+async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
+  const init = initOpt || (await buildUpstreamInit(request));
+  log(rid, 'debug', 'upstream:request', {
+    method: init.method,
+    url: upstreamURL.toString(),
+    headers: redactHeadersObj(headersToObject(init.headers, 64)),
+    body_len: request.headers.get('content-length') || null,
+  }, lvl);
+  const upstreamResp = await fetch(upstreamURL.toString(), init);
+  const contentType = upstreamResp.headers.get('content-type') || '';
+  const isSSE = contentType.includes('text/event-stream');
+  const respHeaders = filterResponseHeaders(upstreamResp.headers);
+  log(rid, 'debug', 'upstream:response', {
+    status: upstreamResp.status,
+    content_type: contentType || null,
+    sse: isSSE,
+    headers: headersToObject(respHeaders, 64),
+    elapsed_ms: Date.now() - start,
+  }, lvl);
+  return new Response(upstreamResp.body, {
+    status: upstreamResp.status,
+    statusText: upstreamResp.statusText,
+    headers: respHeaders,
+  });
+}
+
+// Base32 (RFC 4648, lowercase) without padding, suitable for host labels
+const B32_ALPH = 'abcdefghijklmnopqrstuvwxyz234567';
+function base32Encode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bits = 0, value = 0, output = '';
+  for (let i = 0; i < bytes.length; i++) {
+    value = (value << 8) | bytes[i];
+    bits += 8;
+    while (bits >= 5) {
+      output += B32_ALPH[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) output += B32_ALPH[(value << (5 - bits)) & 31];
+  return output;
+}
+function base32Decode(str) {
+  try {
+    const s = str.toLowerCase().replace(/[^a-z2-7]/g, '');
+    let bits = 0, value = 0;
+    const bytes = [];
+    for (let i = 0; i < s.length; i++) {
+      const idx = B32_ALPH.indexOf(s[i]);
+      if (idx === -1) return null;
+      value = (value << 5) | idx;
+      bits += 5;
+      if (bits >= 8) {
+        bytes.push((value >>> (bits - 8)) & 255);
+        bits -= 8;
+      }
+    }
+    return new TextDecoder().decode(new Uint8Array(bytes));
+  } catch { return null; }
+}
+
+function b32ToHost(b32, domainRoot) {
+  const prefix = 'b32-';
+  const max = 63;
+  const segs = [];
+  let s = b32;
+  const firstLen = Math.min(max - prefix.length, s.length);
+  segs.push(prefix + s.slice(0, firstLen));
+  s = s.slice(firstLen);
+  while (s.length) { segs.push(s.slice(0, max)); s = s.slice(max); }
+  return segs.join('.') + '.' + domainRoot;
+}
+
+
 function html(body, status = 200) {
   const headers = new Headers({
     'Content-Type': 'text/html; charset=utf-8',
@@ -366,9 +461,10 @@ function escapeHtml(unsafe) {
     .replaceAll("'", '&#039;');
 }
 
-function landingHTML(url) {
+function landingHTML(url, env) {
   const origin = url.origin;
   const example = 'https://mcp.atlassian.com/v1/sse';
+  const domainRoot = (env && env.DOMAIN_ROOT) || 'mcp.copernicusone.com';
   const targetParam = url.searchParams.get('url') || '';
   let preRendered = '';
   if (targetParam) {
@@ -379,6 +475,9 @@ function landingHTML(url) {
       const worker = origin + '/' + encoded;
       const curlSse = `curl -N ${worker}`;
       const curlPost = `curl -s ${worker} -H "content-type: application/json" -d "{}"`;
+      const b32 = base32Encode(u.toString());
+      const host = b32ToHost(b32, domainRoot);
+      const domainUrl = `https://${host}/`;
       preRendered = `
         <div class="row grid">
           <div><div class="muted small">Encoded segment</div><div class="code box" id="enc">${escapeHtml(encoded)}</div></div>
@@ -387,6 +486,10 @@ function landingHTML(url) {
         <div class="row grid">
           <div><div class="muted small">Worker URL</div><div class="code box" id="worker">${escapeHtml(worker)}</div></div>
           <button class="btn" onclick="copy(qs('#worker').textContent)">Copy</button>
+        </div>
+        <div class="row grid">
+          <div><div class="muted small">Domain URL</div><div class="code box" id="domain">${escapeHtml(domainUrl)}</div></div>
+          <button class="btn" onclick="copy(qs('#domain').textContent)">Copy</button>
         </div>
         <div class="row">
           <div class="muted">Quick commands</div>
@@ -495,7 +598,7 @@ function landingHTML(url) {
         <div class="small muted">Only TLS upstreams are allowed by default (https:, wss:).</div>
       </form>
       <div id="out" class="row">${preRendered}</div>
-      <div class="row small muted">API: <code>GET ${origin}/encode?url=&lt;full-url&gt;</code> returns JSON.</div>
+      <div class="row small muted">API: <code>GET ${origin}/encode?url=&lt;full-url&gt;</code> returns JSON (includes a domain URL for <code>${domainRoot}</code>).</div>
     </div>
   </body>
   </html>`);

@@ -6,6 +6,6 @@
   "vars": {
     "ALLOW_PROTOCOLS": "https:,wss:",
     "LOG_LEVEL": "debug",
-    "DEFAULT_UPSTREAM": "https://mcp.atlassian.com/"
+    "DOMAIN_ROOT": "mcp.copernicusone.com"
   }
 }
