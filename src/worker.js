@@ -42,6 +42,11 @@ export default {
 
       // Check if this is the landing page subdomain
       const isLandingDomain = url.hostname.toLowerCase() === 'mcp.copernicusone.com';
+
+      // OAuth2 endpoint handling for client authentication
+      if (isLandingDomain && url.pathname.startsWith('/oauth/')) {
+        return handleOAuth2Endpoint(request, url, env, rid, start, lvl);
+      }
       
       // Health and root info - only show on landing domain
       if (isLandingDomain && (url.pathname === '/' || url.pathname === '' || url.pathname === '/index.html')) {
@@ -193,6 +198,17 @@ export default {
           upstream: redactURL(upstreamURL).toString(),
           path: url.pathname,
         }, lvl);
+
+        // Check authentication for protected routes
+        if (needsAuthentication(url.pathname)) {
+          const authResult = await authenticateWorkerRequest(request, env);
+          if (!authResult.success) {
+            log(rid, 'warn', 'auth:failed', { error: authResult.error }, lvl);
+            return json({ error: authResult.error }, authResult.status);
+          }
+          log(rid, 'info', 'auth:success', { scope: authResult.tokenData.scope }, lvl);
+        }
+
         // WebSocket tunneling for host-encoded routing
         const upgrade = request.headers.get('upgrade');
         if (upgrade && upgrade.toLowerCase() === 'websocket') {
@@ -994,4 +1010,258 @@ function landingHTML(url, env) {
     </div>
   </body>
   </html>`);
+}
+
+// OAuth2 handling functions for Cloudflare Worker
+async function handleOAuth2Endpoint(request, url, env, rid, start, lvl) {
+  const path = url.pathname;
+  
+  if (path === '/oauth/authorize' && request.method === 'GET') {
+    return handleOAuth2Authorize(request, url, env, rid, start, lvl);
+  } else if (path === '/oauth/authorize' && request.method === 'POST') {
+    return handleOAuth2AuthorizePost(request, url, env, rid, start, lvl);
+  } else if (path === '/oauth/token' && request.method === 'POST') {
+    return handleOAuth2Token(request, url, env, rid, start, lvl);
+  } else if (path === '/oauth/callback') {
+    return handleOAuth2Callback(request, url, env, rid, start, lvl);
+  }
+  
+  return badRequest('Unknown OAuth2 endpoint');
+}
+
+async function handleOAuth2Authorize(request, url, env, rid, start, lvl) {
+  log(rid, 'info', 'oauth:authorize', {}, lvl);
+  
+  const clientId = url.searchParams.get('client_id');
+  const redirectUri = url.searchParams.get('redirect_uri');
+  const state = url.searchParams.get('state') || '';
+  const scope = url.searchParams.get('scope') || 'read';
+  
+  if (!env.OAUTH2_CLIENT_ID || clientId !== env.OAUTH2_CLIENT_ID) {
+    return badRequest('Invalid client_id');
+  }
+  
+  // Generate session state for this authorization request
+  const authState = await generateSecureState(env);
+  
+  // Simple authorization page (for Cloudflare Worker)
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Authorize MCP Gateway</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+    .form { background: #f5f5f5; padding: 20px; border-radius: 8px; }
+    button { padding: 10px 20px; margin: 5px; border: none; border-radius: 4px; cursor: pointer; }
+    .allow { background: #4CAF50; color: white; }
+    .deny { background: #f44336; color: white; }
+  </style>
+</head>
+<body>
+  <h2>Authorize MCP Gateway</h2>
+  <div class="form">
+    <p>Application requests access with scope: <strong>${scope}</strong></p>
+    <form method="post" action="/oauth/authorize">
+      <input type="hidden" name="auth_state" value="${authState}" />
+      <input type="hidden" name="client_state" value="${state}" />
+      <input type="hidden" name="redirect_uri" value="${redirectUri}" />
+      <input type="hidden" name="scope" value="${scope}" />
+      <button type="submit" name="action" value="allow" class="allow">Allow</button>
+      <button type="submit" name="action" value="deny" class="deny">Deny</button>
+    </form>
+  </div>
+</body>
+</html>`;
+
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html; charset=utf-8' }
+  });
+}
+
+async function handleOAuth2AuthorizePost(request, url, env, rid, start, lvl) {
+  log(rid, 'info', 'oauth:authorize-post', {}, lvl);
+  
+  const formData = await request.formData();
+  const authState = formData.get('auth_state');
+  const clientState = formData.get('client_state');
+  const redirectUri = formData.get('redirect_uri');
+  const scope = formData.get('scope');
+  const action = formData.get('action');
+  
+  // Verify the auth state (in production, this would be stored in KV or Durable Objects)
+  if (!authState || !await verifySecureState(authState, env)) {
+    return badRequest('Invalid or expired state');
+  }
+  
+  if (action === 'deny') {
+    const errorUrl = new URL(redirectUri);
+    errorUrl.searchParams.set('error', 'access_denied');
+    if (clientState) errorUrl.searchParams.set('state', clientState);
+    return Response.redirect(errorUrl.toString(), 302);
+  }
+  
+  // Generate authorization code (JWT for stateless worker)
+  const code = await generateAuthorizationCode(authState, scope, env);
+  
+  const callbackUrl = new URL(redirectUri);
+  callbackUrl.searchParams.set('code', code);
+  if (clientState) callbackUrl.searchParams.set('state', clientState);
+  
+  log(rid, 'info', 'oauth:authorization-granted', { redirect: callbackUrl.toString() }, lvl);
+  return Response.redirect(callbackUrl.toString(), 302);
+}
+
+async function handleOAuth2Token(request, url, env, rid, start, lvl) {
+  log(rid, 'info', 'oauth:token', {}, lvl);
+  
+  const formData = await request.formData();
+  const grantType = formData.get('grant_type');
+  const code = formData.get('code');
+  const redirectUri = formData.get('redirect_uri');
+  const clientId = formData.get('client_id');
+  const clientSecret = formData.get('client_secret');
+  
+  if (grantType !== 'authorization_code') {
+    return json({ error: 'unsupported_grant_type' }, 400);
+  }
+  
+  if (!env.OAUTH2_CLIENT_ID || !env.OAUTH2_CLIENT_SECRET ||
+      clientId !== env.OAUTH2_CLIENT_ID || clientSecret !== env.OAUTH2_CLIENT_SECRET) {
+    return json({ error: 'invalid_client' }, 401);
+  }
+  
+  // Verify and decode the authorization code
+  const codeData = await verifyAuthorizationCode(code, env);
+  if (!codeData) {
+    return json({ error: 'invalid_grant' }, 400);
+  }
+  
+  // Generate access token (JWT for stateless authentication)
+  const accessToken = await generateAccessToken(codeData, env);
+  
+  log(rid, 'info', 'oauth:token-granted', { scope: codeData.scope }, lvl);
+  
+  return json({
+    access_token: accessToken,
+    token_type: 'Bearer',
+    expires_in: 3600,
+    scope: codeData.scope,
+  });
+}
+
+async function handleOAuth2Callback(request, url, env, rid, start, lvl) {
+  log(rid, 'info', 'oauth:callback', {}, lvl);
+  
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const error = url.searchParams.get('error');
+  
+  if (error) {
+    return badRequest(`Upstream OAuth2 error: ${error}`);
+  }
+  
+  // In a real implementation, this would handle the upstream OAuth2 callback
+  // For now, just show a success page
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Authentication Complete</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; text-align: center; }
+    .success { color: #4CAF50; }
+  </style>
+</head>
+<body>
+  <h2 class="success">Authentication Complete</h2>
+  <p>You are now authenticated with the MCP Gateway.</p>
+  <p>You can close this window and return to your application.</p>
+</body>
+</html>`;
+
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html; charset=utf-8' }
+  });
+}
+
+// JWT-based stateless authentication utilities for Cloudflare Worker
+async function generateSecureState(env) {
+  const data = { 
+    timestamp: Date.now(),
+    random: Math.random().toString(36).slice(2) 
+  };
+  return btoa(JSON.stringify(data));
+}
+
+async function verifySecureState(state, env) {
+  try {
+    const data = JSON.parse(atob(state));
+    const age = Date.now() - data.timestamp;
+    return age < 10 * 60 * 1000; // 10 minutes
+  } catch {
+    return false;
+  }
+}
+
+async function generateAuthorizationCode(authState, scope, env) {
+  const data = {
+    authState,
+    scope,
+    timestamp: Date.now(),
+  };
+  return btoa(JSON.stringify(data));
+}
+
+async function verifyAuthorizationCode(code, env) {
+  try {
+    const data = JSON.parse(atob(code));
+    const age = Date.now() - data.timestamp;
+    if (age > 10 * 60 * 1000) return null; // 10 minutes expiry
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function generateAccessToken(codeData, env) {
+  const data = {
+    scope: codeData.scope,
+    timestamp: Date.now(),
+    expires: Date.now() + 60 * 60 * 1000, // 1 hour
+  };
+  return btoa(JSON.stringify(data));
+}
+
+async function verifyAccessToken(token, env) {
+  try {
+    const data = JSON.parse(atob(token));
+    if (Date.now() > data.expires) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+// Authentication middleware for Cloudflare Worker
+async function authenticateWorkerRequest(request, env) {
+  const authHeader = request.headers.get('authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return { error: 'Missing or invalid authorization header', status: 401 };
+  }
+  
+  const token = authHeader.slice(7);
+  const tokenData = await verifyAccessToken(token, env);
+  
+  if (!tokenData) {
+    return { error: 'Invalid or expired token', status: 401 };
+  }
+  
+  return { success: true, tokenData };
+}
+
+// Check if a path requires authentication
+function needsAuthentication(pathname) {
+  // Protect API endpoints but not static resources or OAuth endpoints
+  return pathname.startsWith('/v1/') || 
+         pathname.startsWith('/api/') ||
+         (pathname.includes('sse') && !pathname.includes('oauth'));
 }

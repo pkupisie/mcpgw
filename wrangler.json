@@ -6,6 +6,8 @@
   "vars": {
     "ALLOW_PROTOCOLS": "https:,wss:",
     "LOG_LEVEL": "debug",
-    "DOMAIN_ROOT": "copernicusone.com"
+    "DOMAIN_ROOT": "copernicusone.com",
+    "OAUTH2_CLIENT_ID": "worker-client-id",
+    "OAUTH2_CLIENT_SECRET": "worker-client-secret"
   }
 }
