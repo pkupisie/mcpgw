@@ -248,39 +248,26 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   const userAgent = request.headers.get('user-agent');
   const authHeader = request.headers.get('Authorization');
   
-  // If it's an MCP client without auth, try public proxy mode first
+  // If it's an MCP client without auth, reject and force OAuth
   if (mcpProtocolVersion && (!authHeader || !authHeader.startsWith('Bearer '))) {
-    console.log('MCP client detected without OAuth, trying public proxy mode');
+    console.log('MCP client detected without OAuth - requiring authentication');
     console.log(`MCP Protocol: ${mcpProtocolVersion}, Auth header: ${authHeader || 'none'}, User-Agent: ${userAgent}`);
     
-    // Try proxying to upstream without authentication
-    const upstreamUrl = new URL(request.url.replace(request.url.split('/')[2], hostRoute.upstreamBase.host));
-    
-    const upstreamHeaders: Record<string, string> = {};
-    request.headers.forEach((value, key) => {
-      if (key.toLowerCase() !== 'host') {
-        upstreamHeaders[key] = value;
+    // Always require authentication for MCP clients
+    return new Response(JSON.stringify({ 
+      error: 'authentication_required',
+      error_description: 'OAuth authentication is required for MCP access',
+      authUrl: `https://${getCurrentDomain(request)}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`
+    }), { 
+      status: 401,
+      headers: { 
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': 'Bearer realm="MCP Gateway"'
       }
     });
-    upstreamHeaders['Host'] = hostRoute.upstreamBase.hostname;
-
-    const upstreamRequest = new Request(upstreamUrl.toString(), {
-      method: request.method,
-      headers: upstreamHeaders,
-      body: request.body,
-    });
-    
-    try {
-      const response = await fetch(upstreamRequest);
-      // If upstream works, return the response
-      if (response.status !== 401) {
-        return response;
-      }
-      // If upstream returns 401, fall through to OAuth requirement
-    } catch (error) {
-      console.log('Public proxy failed:', error);
-    }
   }
+  
+  // Removed public proxy mode - now requiring authentication for all MCP clients
   
   // If not an MCP client or public proxy failed, require local OAuth
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
