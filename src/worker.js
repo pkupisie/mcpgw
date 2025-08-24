@@ -114,8 +114,7 @@ export default {
       // Pass-through SSE streaming (or any streaming body)
       const contentType = upstreamResp.headers.get('content-type') || '';
       const isSSE = contentType.includes('text/event-stream');
-      const respHeaders = filterResponseHeaders(upstreamResp.headers, { forceSSE: isSSE });
-      try { respHeaders.set('x-mcp-request-id', rid); } catch {}
+      const respHeaders = filterResponseHeaders(upstreamResp.headers);
       log(rid, 'debug', 'upstream:response', {
         status: upstreamResp.status,
         content_type: contentType || null,
@@ -225,14 +224,9 @@ async function buildUpstreamInit(request, env) {
   const init = { method, headers: filterRequestHeaders(request.headers) };
 
   if (!['GET', 'HEAD'].includes(method)) {
-    // Pass-through body as-is. Clone to avoid stream lock issues.
+    // Pass-through body as-is (exact stream) without parsing or rebuilding
     init.body = request.body;
   }
-
-  // Enforce no compression to keep SSE clean
-  init.headers.delete('accept-encoding');
-  // Identify proxy
-  init.headers.set('x-mcp-proxy', 'true');
 
   // Optional timeout via cf.connectTimeout? Not public; rely on platform defaults.
   return init;
@@ -250,18 +244,16 @@ function corsPreflight(request) {
 }
 
 function filterRequestHeaders(inHeaders) {
-  const hopByHop = new Set([
+  // Forward all headers verbatim except hop-by-hop and restricted ones the platform sets itself
+  const drop = new Set([
     'connection','keep-alive','proxy-authenticate','proxy-authorization',
-    'te','trailer','transfer-encoding','upgrade','accept-encoding','host','content-length'
-  ]);
-  const allowNames = new Set([
-    'authorization','content-type','accept','accept-language','user-agent','origin','referer','cache-control','pragma','if-none-match','if-modified-since','range'
+    'te','trailer','transfer-encoding','upgrade','host'
   ]);
   const out = new Headers();
   for (const [k, v] of inHeaders.entries()) {
     const key = k.toLowerCase();
-    if (hopByHop.has(key)) continue;
-    if (allowNames.has(key) || key.startsWith('x-')) out.set(k, v);
+    if (drop.has(key)) continue;
+    out.set(k, v);
   }
   return out;
 }
@@ -280,19 +272,11 @@ function filterResponseHeaders(inHeaders, { forceSSE = false } = {}) {
   for (const [k, v] of inHeaders.entries()) {
     const key = k.toLowerCase();
     if (hopByHop.has(key)) continue;
-    // Avoid sending explicit content-length on streaming responses
-    if (key === 'content-length') continue;
     out.set(k, v);
   }
-  // CORS echo for browsers
+  // Minimal CORS for browser-based usage; does not modify upstream core headers
   out.set('Access-Control-Allow-Origin', '*');
-  out.set('Access-Control-Expose-Headers', '*, X-MCP-Request-Id, x-mcp-request-id');
   out.set('Vary', addVary(out.get('Vary'), 'Origin'));
-  if (forceSSE) {
-    out.set('Content-Type', 'text/event-stream; charset=utf-8');
-    out.set('Cache-Control', 'no-cache, no-transform');
-    out.set('Connection', 'keep-alive');
-  }
   return out;
 }
 
