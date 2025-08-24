@@ -1281,14 +1281,12 @@ async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, 
   let clientCredentials = registeredClients.get(hostRoute.serverDomain);
   const currentDomain = getCurrentDomain(request);
   
-  // Use landing domain for OAuth callback to satisfy Atlassian's allowlist
-  // We'll handle the callback and redirect back to complete the client OAuth
-  const landingDomain = env.DOMAIN_ROOT || 'copernicusone.com';
-  const redirectUri = `https://mcp.${landingDomain}/oauth/callback`;
+  // Use the encoded domain as redirect URI - test if dynamic registration resolved allowlist issue
+  const redirectUri = `https://${currentDomain}/oauth/callback`;
   
   console.log(`Checking for registered client for ${hostRoute.serverDomain}:`, clientCredentials ? 'Found existing client' : 'No existing client');
   console.log('All registered clients:', Array.from(registeredClients.entries()));
-  console.log(`Using Claude's redirect URI: ${redirectUri} (current domain: ${currentDomain})`);
+  console.log(`Using encoded domain redirect URI: ${redirectUri}`);
   
   if (!clientCredentials) {
     // Register client if server supports dynamic registration
