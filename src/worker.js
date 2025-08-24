@@ -66,16 +66,41 @@ export default {
       if (url.pathname === '/encode') {
         const target = url.searchParams.get('url') || '';
         if (!target) return badRequest('Missing url param');
-        let encoded = '';
-        try { encoded = toBase64Url(target); } catch (e) { return badRequest('Invalid URL input'); }
-        const worker = `${url.origin}/${encoded}`;
-        // Domain-encoded host output
-        const domainRoot = env.DOMAIN_ROOT || 'mcp.copernicusone.com';
-        const b32 = base32Encode(target);
-        const host = b32ToHost(b32, domainRoot);
-        const domain_url = `https://${host}/`;
-        const resp = json({ original: target, encoded, worker_url: worker, base32: b32, domain_host: host, domain_url });
-        log(rid, 'info', 'route:encode', { target, encoded: encoded.substring(0, 20) + '...' }, lvl);
+        
+        // Handle both domain names and full URLs
+        let targetUrl = target;
+        let domainOnly = target;
+        
+        try {
+          if (!target.startsWith('http://') && !target.startsWith('https://')) {
+            targetUrl = 'https://' + target;
+          }
+          const u = new URL(targetUrl);
+          domainOnly = u.hostname;
+        } catch (e) {
+          return badRequest('Invalid domain or URL input');
+        }
+        
+        // Use base64 encoding for the domain name
+        const domainRoot = env.DOMAIN_ROOT || 'copernicusone.com';
+        const encoded = toBase64Url(domainOnly);
+        const domain_url = `https://${encoded}.${domainRoot}/`;
+        
+        // Also provide base32 version for compatibility
+        const b32 = base32Encode(targetUrl);
+        const b32Host = b32ToHost(b32, domainRoot);
+        const b32_url = `https://${b32Host}/`;
+        
+        const resp = json({ 
+          original: target, 
+          domain: domainOnly,
+          base64_encoded: encoded,
+          base64_url: domain_url,
+          base32_encoded: b32,
+          base32_url: b32_url
+        });
+        
+        log(rid, 'info', 'route:encode', { target, domain: domainOnly, encoded: encoded.substring(0, 20) + '...' }, lvl);
         
         const elapsed = Date.now() - start;
         log(rid, 'info', 'response:complete', {
@@ -194,17 +219,6 @@ function splitEncodedPath(pathname) {
   return { encoded: clean.slice(0, idx), restPath: clean.slice(idx + 1) };
 }
 
-function decodeB64UrlToURL(b64u) {
-  try {
-    // Handle URL-safe base64 without padding
-    const normalized = b64u.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(b64u.length / 4) * 4, '=');
-    const str = atob(normalized);
-    const u = new URL(str);
-    return u;
-  } catch (e) {
-    return null;
-  }
-}
 
 function joinPaths(basePath, tail) {
   const a = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath;
@@ -454,13 +468,30 @@ function redactURL(u) {
 
 // --- Host-encoded routing helpers ---
 function parseHostEncodedUpstream(hostname, env) {
-  const root = (env.DOMAIN_ROOT || 'mcp.copernicusone.com').toLowerCase();
+  const root = (env.DOMAIN_ROOT || 'copernicusone.com').toLowerCase();
   const host = (hostname || '').toLowerCase();
   if (!host.endsWith('.' + root)) return null;
   const parts = host.split('.');
   const rootParts = root.split('.');
   if (parts.length <= rootParts.length) return null; // it's the root domain itself
   const encodedLabels = parts.slice(0, parts.length - rootParts.length);
+  
+  // First try base64 decoding for single-label subdomains
+  if (encodedLabels.length === 1) {
+    const b64Label = encodedLabels[0];
+    const decodedDomain = decodeBase64Url(b64Label);
+    if (decodedDomain) {
+      try {
+        // The decoded value is just a domain name, so we need to add https://
+        const url = new URL('https://' + decodedDomain);
+        return { upstreamBase: url };
+      } catch {
+        // Fall through to base32 decoding
+      }
+    }
+  }
+  
+  // Then try base32 decoding (for multi-label or b32-prefixed)
   let joined = encodedLabels.join('');
   if (joined.startsWith('b32-')) joined = joined.slice(4);
   if (!joined) return null;
@@ -470,6 +501,22 @@ function parseHostEncodedUpstream(hostname, env) {
     const url = new URL(decoded);
     return { upstreamBase: url };
   } catch { return null; }
+}
+
+// Helper function to decode base64 URL-safe encoding
+function decodeBase64Url(b64u) {
+  try {
+    // Handle URL-safe base64 without padding
+    const normalized = b64u.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(b64u.length / 4) * 4, '=');
+    const str = atob(normalized);
+    // Check if it looks like a valid domain
+    if (/^[a-zA-Z0-9.-]+$/.test(str)) {
+      return str;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function selectUpstreamForRequest(upstreamBase, reqUrl, request) {
@@ -631,43 +678,51 @@ function escapeHtml(unsafe) {
 
 function landingHTML(url, env) {
   const origin = url.origin;
-  const example = 'https://mcp.atlassian.com/v1/sse';
-  const domainRoot = (env && env.DOMAIN_ROOT) || 'mcp.copernicusone.com';
+  const example = 'mcp.atlassian.com';
+  const domainRoot = (env && env.DOMAIN_ROOT) || 'copernicusone.com';
   const targetParam = url.searchParams.get('url') || '';
   let preRendered = '';
   if (targetParam) {
     try {
-      // Validate URL
-      const u = new URL(targetParam);
-      const encoded = toBase64Url(u.toString());
-      const worker = origin + '/' + encoded;
-      const curlSse = `curl -N ${worker}`;
-      const curlPost = `curl -s ${worker} -H "content-type: application/json" -d "{}"`;
+      // Handle both domain names and full URLs
+      let targetUrl = targetParam;
+      if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+        targetUrl = 'https://' + targetUrl;
+      }
+      const u = new URL(targetUrl);
+      
+      // Use base64 encoding for the domain name
+      const domainOnly = u.hostname;
+      const encoded = toBase64Url(domainOnly);
+      const domainUrl = `https://${encoded}.${domainRoot}/`;
+      
+      // Also show base32 version for compatibility
       const b32 = base32Encode(u.toString());
-      const host = b32ToHost(b32, domainRoot);
-      const domainUrl = `https://${host}/`;
+      const b32Host = b32ToHost(b32, domainRoot);
+      const b32DomainUrl = `https://${b32Host}/`;
+      
       preRendered = `
         <div class="row grid">
-          <div><div class="muted small">Encoded segment</div><div class="code box" id="enc">${escapeHtml(encoded)}</div></div>
-          <button class="btn" onclick="copy(qs('#enc').textContent)">Copy</button>
+          <div><div class="muted small">Domain</div><div class="code box" id="domain-input">${escapeHtml(domainOnly)}</div></div>
+          <button class="btn" onclick="copy(qs('#domain-input').textContent)">Copy</button>
         </div>
         <div class="row grid">
-          <div><div class="muted small">Worker URL</div><div class="code box" id="worker">${escapeHtml(worker)}</div></div>
-          <button class="btn" onclick="copy(qs('#worker').textContent)">Copy</button>
-        </div>
-        <div class="row grid">
-          <div><div class="muted small">Domain URL</div><div class="code box" id="domain">${escapeHtml(domainUrl)}</div></div>
+          <div><div class="muted small">Base64 Encoded URL</div><div class="code box" id="domain">${escapeHtml(domainUrl)}</div></div>
           <button class="btn" onclick="copy(qs('#domain').textContent)">Copy</button>
+        </div>
+        <div class="row grid">
+          <div><div class="muted small">Base32 URL (Alternative)</div><div class="code box" id="b32domain">${escapeHtml(b32DomainUrl)}</div></div>
+          <button class="btn" onclick="copy(qs('#b32domain').textContent)">Copy</button>
         </div>
         <div class="row">
           <div class="muted">Quick commands</div>
           <div class="box small code" style="overflow:auto">
-            <div>$ ${escapeHtml(curlSse)}</div>
+            <div>$ curl -N ${escapeHtml(domainUrl)}</div>
             <div class="muted"># POST example</div>
-            <div>$ ${escapeHtml(curlPost)}</div>
+            <div>$ curl -s ${escapeHtml(domainUrl)} -H "content-type: application/json" -d "{}"</div>
           </div>
         </div>
-        <div class="row small muted">Tip: Append extra path or query after the encoded segment, e.g. if you encoded only the origin.</div>
+        <div class="row small muted">Tip: The encoded subdomain represents the target domain. Append paths as needed.</div>
       `;
     } catch {}
   }
@@ -682,7 +737,7 @@ function landingHTML(url, env) {
     body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; line-height: 1.45; }
     .wrap { max-width: 860px; margin: 0 auto; }
     h1 { font-size: 1.6rem; margin: 0 0 1rem; }
-    input[type=url] { width: 100%; padding: .6rem .7rem; font-size: 1rem; border-radius: .5rem; border: 1px solid #bbb; background: transparent; }
+    input[type=text], input[type=url] { width: 100%; padding: .6rem .7rem; font-size: 1rem; border-radius: .5rem; border: 1px solid #bbb; background: transparent; }
     .row { margin: 1rem 0; }
     .muted { opacity: .75; font-size: .9rem; }
     code, .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -719,32 +774,49 @@ function landingHTML(url, env) {
       const input = qs('#target');
       const raw = input.value.trim();
       const out = qs('#out');
-      const url = new URL(window.location.href);
-      if(!raw){ out.innerHTML = '<em class="muted">Enter a full MCP server URL to get started</em>'; return; }
-      let encoded = '';
-      try { new URL(raw); encoded = toBase64Url(raw); }
-      catch(e){ out.innerHTML = '<span style="color:#c00">Invalid URL</span>'; return; }
-      const worker = url.origin + '/' + encoded;
-      const curlSse = 'curl -N ' + worker;
-      const curlPost = 'curl -s ' + worker + ' -H \"content-type: application/json\" -d \"{}\"';
+      const domainRoot = '${domainRoot}';
+      
+      if(!raw){ 
+        out.innerHTML = '<em class="muted">Enter a domain name to get started</em>'; 
+        return; 
+      }
+      
+      // Handle both domain names and full URLs
+      let domain = raw;
+      try {
+        if (raw.startsWith('http://') || raw.startsWith('https://')) {
+          const u = new URL(raw);
+          domain = u.hostname;
+        } else if (raw.includes('://')) {
+          out.innerHTML = '<span style="color:#c00">Invalid URL protocol</span>'; 
+          return;
+        }
+      } catch(e) {
+        // Assume it's a domain name
+      }
+      
+      // Generate the base64 encoded URL
+      const encoded = toBase64Url(domain);
+      const domainUrl = 'https://' + encoded + '.' + domainRoot + '/';
+      
       out.innerHTML = \`
         <div class="row grid">
-          <div><div class="muted small">Encoded segment</div><div class="code box" id="enc">\${encoded}</div></div>
-          <button class="btn" onclick="copy(qs('#enc').textContent)">Copy</button>
+          <div><div class="muted small">Domain</div><div class="code box" id="domain-input">\${domain}</div></div>
+          <button class="btn" onclick="copy(qs('#domain-input').textContent)">Copy</button>
         </div>
         <div class="row grid">
-          <div><div class="muted small">Worker URL</div><div class="code box" id="worker">\${worker}</div></div>
-          <button class="btn" onclick="copy(qs('#worker').textContent)">Copy</button>
+          <div><div class="muted small">Encoded URL</div><div class="code box" id="domain">\${domainUrl}</div></div>
+          <button class="btn" onclick="copy(qs('#domain').textContent)">Copy</button>
         </div>
         <div class="row">
           <div class="muted">Quick commands</div>
           <div class="box small code" style="overflow:auto">
-            <div>$ \${curlSse}</div>
+            <div>$ curl -N \${domainUrl}</div>
             <div class="muted"># POST example</div>
-            <div>$ \${curlPost}</div>
+            <div>$ curl -s \${domainUrl} -H "content-type: application/json" -d "{}"</div>
           </div>
         </div>
-        <div class="row small muted">Tip: Append extra path or query after the encoded segment, e.g. if you encoded only the origin.</div>
+        <div class="row small muted">Tip: The encoded subdomain represents the target domain. Append paths as needed.</div>
       \`;
     }
     addEventListener('DOMContentLoaded', () => {
@@ -756,17 +828,17 @@ function landingHTML(url, env) {
   <body>
     <div class="wrap">
       <h1>MCP MITM Proxy</h1>
-      <div class="muted">Origin: <code>${origin}</code></div>
+      <div class="muted">Domain Root: <code>${domainRoot}</code></div>
       <form class="row" method="GET" action="/">
-        <label for="target">Enter the full upstream MCP URL</label>
+        <label for="target">Enter a domain name</label>
         <div class="grid">
-          <input id="target" name="url" type="url" placeholder="e.g. ${example}" value="${escapeHtml(targetParam)}" spellcheck="false" required />
+          <input id="target" name="url" type="text" placeholder="e.g. ${example}" value="${escapeHtml(targetParam)}" spellcheck="false" required />
           <button class="btn" type="submit">Generate</button>
         </div>
-        <div class="small muted">Only TLS upstreams are allowed by default (https:, wss:).</div>
+        <div class="small muted">The domain will be encoded in base64 and used as a subdomain.</div>
       </form>
       <div id="out" class="row">${preRendered}</div>
-      <div class="row small muted">API: <code>GET ${origin}/encode?url=&lt;full-url&gt;</code> returns JSON (includes a domain URL for <code>${domainRoot}</code>).</div>
+      <div class="row small muted">API: <code>GET ${origin}/encode?url=&lt;domain&gt;</code> returns JSON with the encoded URL.</div>
     </div>
   </body>
   </html>`);
