@@ -349,25 +349,25 @@ function landingHTML(url) {
       const worker = url.origin + '/' + encoded;
       const curlSse = 'curl -N ' + worker;
       const curlPost = 'curl -s ' + worker + ' -H \"content-type: application/json\" -d \"{}\"';
-      out.innerHTML = `
+      out.innerHTML = \`
         <div class="row grid">
-          <div><div class="muted small">Encoded segment</div><div class="code box" id="enc">${encoded}</div></div>
+          <div><div class="muted small">Encoded segment</div><div class="code box" id="enc">\${encoded}</div></div>
           <button class="btn" onclick="copy(qs('#enc').textContent)">Copy</button>
         </div>
         <div class="row grid">
-          <div><div class="muted small">Worker URL</div><div class="code box" id="worker">${worker}</div></div>
+          <div><div class="muted small">Worker URL</div><div class="code box" id="worker">\${worker}</div></div>
           <button class="btn" onclick="copy(qs('#worker').textContent)">Copy</button>
         </div>
         <div class="row">
           <div class="muted">Quick commands</div>
           <div class="box small code" style="overflow:auto">
-            <div>$ ${curlSse}</div>
+            <div>$ \${curlSse}</div>
             <div class="muted"># POST example</div>
-            <div>$ ${curlPost}</div>
+            <div>$ \${curlPost}</div>
           </div>
         </div>
         <div class="row small muted">Tip: Append extra path or query after the encoded segment, e.g. if you encoded only the origin.</div>
-      `;
+      \`;
     }
     addEventListener('DOMContentLoaded', () => {
       qs('#target').addEventListener('input', update);
