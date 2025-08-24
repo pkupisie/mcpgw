@@ -1634,6 +1634,10 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
         clientRedirectUrl.searchParams.set('state', pendingAuth.state);
       }
       
+      console.log(`Redirecting back to Claude with code: ${clientCode}`);
+      console.log(`Redirect URL: ${clientRedirectUrl.toString()}`);
+      console.log(`Pending auth was: ${JSON.stringify(pendingAuth, null, 2)}`);
+      
       // Clear pending authorization
       delete session.pendingClientAuth;
       
