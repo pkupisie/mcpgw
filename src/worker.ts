@@ -45,6 +45,18 @@ interface SessionData {
       client_id: string;
     };
   };
+  deviceCodes?: {
+    [domain: string]: {
+      [device_code: string]: {
+        user_code: string;
+        verification_uri: string;
+        expires_at: number;
+        client_id: string;
+        scope: string;
+        interval: number;
+      };
+    };
+  };
 }
 
 interface MCPRouteInfo {
@@ -72,6 +84,18 @@ export default {
       const hostRoute = parseHostEncodedUpstream(url.hostname, env.DOMAIN_ROOT);
       
       if (hostRoute) {
+        // Handle CORS preflight requests
+        if (request.method === 'OPTIONS') {
+          return new Response(null, {
+            headers: {
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+              'Access-Control-Allow-Headers': 'Content-Type, Authorization, MCP-Protocol-Version',
+              'Access-Control-Max-Age': '86400'
+            }
+          });
+        }
+        
         // Check if this is a local OAuth request
         if (url.pathname === '/.well-known/oauth-authorization-server') {
           return handleOAuthDiscovery(request, hostRoute, env);
@@ -226,16 +250,29 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   
   // Check upstream OAuth tokens for this server
   const serverData = sessionWithToken.oauth?.[hostRoute.serverDomain];
-  if (!serverData?.tokens) {
-    return new Response(JSON.stringify({ 
-      error: 'upstream_auth_required',
-      error_description: 'Upstream server authentication required',
-      server: hostRoute.serverDomain,
-      authUrl: `https://${getCurrentDomain(request)}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`
-    }), { 
-      status: 401,
-      headers: { 'Content-Type': 'application/json' }
-    });
+  let useUpstreamAuth = !!serverData?.tokens;
+  
+  // If no upstream auth configured, try without auth first (bypass mode)
+  if (!useUpstreamAuth) {
+    // Try to discover upstream OAuth capabilities
+    const upstreamOAuthDiscovery = await discoverUpstreamOAuth(hostRoute.serverDomain);
+    
+    if (upstreamOAuthDiscovery) {
+      // Upstream supports OAuth but we don't have tokens
+      return new Response(JSON.stringify({ 
+        error: 'upstream_auth_required',
+        error_description: 'Upstream server authentication required',
+        server: hostRoute.serverDomain,
+        authUrl: `https://${getCurrentDomain(request)}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`,
+        upstreamOAuth: upstreamOAuthDiscovery
+      }), { 
+        status: 401,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // No upstream OAuth discovered, try without auth (public server mode)
+    useUpstreamAuth = false;
   }
   
   // Build upstream request
@@ -247,7 +284,11 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
       upstreamHeaders[key] = value;
     }
   });
-  upstreamHeaders['Authorization'] = `Bearer ${serverData.tokens.access_token}`;
+  
+  // Only add upstream auth if we have tokens
+  if (useUpstreamAuth && serverData?.tokens) {
+    upstreamHeaders['Authorization'] = `Bearer ${serverData.tokens.access_token}`;
+  }
   upstreamHeaders['Host'] = hostRoute.upstreamBase.hostname;
 
   // Check for WebSocket upgrade
@@ -402,18 +443,23 @@ async function handleOAuthDiscovery(request: Request, hostRoute: MCPRouteInfo, e
     issuer: `https://${hostname}`,
     authorization_endpoint: `https://${hostname}/oauth/authorize`,
     token_endpoint: `https://${hostname}/oauth/token`,
+    device_authorization_endpoint: `https://${hostname}/oauth/device`,
     revocation_endpoint: `https://${hostname}/oauth/revoke`,
+    introspection_endpoint: `https://${hostname}/oauth/introspect`,
     response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code', 'refresh_token'],
+    grant_types_supported: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code'],
     code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
-    scopes_supported: ['openid', 'profile', 'email']
+    scopes_supported: ['openid', 'profile', 'email', 'mcp'],
+    device_authorization_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none']
   };
   
   return new Response(JSON.stringify(discovery, null, 2), {
     headers: { 
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       'Cache-Control': 'max-age=3600'
     }
   });
@@ -431,8 +477,21 @@ async function handleLocalOAuth(request: Request, hostRoute: MCPRouteInfo, env: 
     if (request.method === 'POST') return handleLocalOAuthToken(request, hostRoute, env);
   }
   
+  if (url.pathname === '/oauth/device') {
+    if (request.method === 'POST') return handleLocalOAuthDevice(request, hostRoute, env);
+  }
+  
   if (url.pathname === '/oauth/revoke') {
     if (request.method === 'POST') return handleLocalOAuthRevoke(request, hostRoute, env);
+  }
+  
+  if (url.pathname === '/oauth/introspect') {
+    if (request.method === 'POST') return handleLocalOAuthIntrospect(request, hostRoute, env);
+  }
+  
+  if (url.pathname === '/oauth/device/verify') {
+    if (request.method === 'GET') return handleDeviceVerify(request, hostRoute, env);
+    if (request.method === 'POST') return handleDeviceVerifyPost(request, hostRoute, env);
   }
   
   return new Response('OAuth endpoint not found', { status: 404 });
@@ -657,6 +716,96 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     });
   }
   
+  if (grant_type === 'urn:ietf:params:oauth:grant-type:device_code') {
+    const device_code = formData.get('device_code') as string;
+    const client_id = formData.get('client_id') as string;
+    const hostname = new URL(request.url).hostname;
+    
+    if (!device_code || !client_id) {
+      return new Response(JSON.stringify({ error: 'invalid_request' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Find device code in any session
+    let deviceData: any = null;
+    let sessionWithDevice: SessionData | null = null;
+    
+    for (const session of sessions.values()) {
+      const deviceCodeData = session.deviceCodes?.[hostname]?.[device_code];
+      if (deviceCodeData) {
+        if (deviceCodeData.expires_at < Date.now()) {
+          // Device code expired
+          delete session.deviceCodes[hostname][device_code];
+          return new Response(JSON.stringify({ error: 'expired_token' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        
+        if (deviceCodeData.client_id !== client_id) {
+          return new Response(JSON.stringify({ error: 'invalid_client' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        
+        deviceData = deviceCodeData;
+        sessionWithDevice = session;
+        break;
+      }
+    }
+    
+    if (!deviceData || !sessionWithDevice) {
+      return new Response(JSON.stringify({ error: 'invalid_grant' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Check if user has authorized this device code
+    if (!sessionWithDevice.localAuth) {
+      return new Response(JSON.stringify({ 
+        error: 'authorization_pending',
+        error_description: 'User has not yet authorized the device'
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Generate tokens
+    const access_token = `gw_access_${generateRandomString(32)}`;
+    const refresh_token = `gw_refresh_${generateRandomString(32)}`;
+    const expires_in = 3600;
+    
+    // Store tokens
+    if (!sessionWithDevice.localOAuthTokens) {
+      sessionWithDevice.localOAuthTokens = {};
+    }
+    
+    sessionWithDevice.localOAuthTokens[hostname] = {
+      access_token,
+      refresh_token,
+      expires_at: Date.now() + (expires_in * 1000),
+      client_id: deviceData.client_id
+    };
+    
+    // Clean up device code
+    delete sessionWithDevice.deviceCodes[hostname][device_code];
+    
+    return new Response(JSON.stringify({
+      access_token,
+      refresh_token,
+      token_type: 'Bearer',
+      expires_in,
+      scope: deviceData.scope
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
   return new Response(JSON.stringify({ error: 'unsupported_grant_type' }), {
     status: 400,
     headers: { 'Content-Type': 'application/json' }
@@ -680,6 +829,215 @@ async function handleLocalOAuthRevoke(request: Request, hostRoute: MCPRouteInfo,
   return new Response('', { status: 200 });
 }
 
+async function handleLocalOAuthDevice(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const formData = await request.formData();
+  const client_id = formData.get('client_id') as string;
+  const scope = formData.get('scope') as string || 'mcp';
+  
+  if (!client_id) {
+    return new Response(JSON.stringify({ error: 'invalid_request', error_description: 'client_id is required' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  const hostname = new URL(request.url).hostname;
+  
+  // Generate device code and user code
+  const device_code = `device_${generateRandomString(32)}`;
+  const user_code = generateUserCode(); // 6-digit code
+  const expires_in = 1800; // 30 minutes
+  const interval = 5; // Poll every 5 seconds
+  
+  // Create or get session for device codes
+  let session: SessionData;
+  const sessionId = getSessionId(request);
+  if (sessionId) {
+    session = await getSession(sessionId, env) || createDeviceSession();
+  } else {
+    session = createDeviceSession();
+    const newSessionId = generateSessionId();
+    sessions.set(newSessionId, session);
+  }
+  
+  // Store device code
+  if (!session.deviceCodes) {
+    session.deviceCodes = {};
+  }
+  if (!session.deviceCodes[hostname]) {
+    session.deviceCodes[hostname] = {};
+  }
+  
+  session.deviceCodes[hostname][device_code] = {
+    user_code,
+    verification_uri: `https://${hostname}/oauth/device/verify`,
+    expires_at: Date.now() + (expires_in * 1000),
+    client_id,
+    scope,
+    interval
+  };
+  
+  return new Response(JSON.stringify({
+    device_code,
+    user_code,
+    verification_uri: `https://${hostname}/oauth/device/verify`,
+    verification_uri_complete: `https://${hostname}/oauth/device/verify?user_code=${user_code}`,
+    expires_in,
+    interval
+  }), {
+    headers: { 
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*'
+    }
+  });
+}
+
+async function handleLocalOAuthIntrospect(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const formData = await request.formData();
+  const token = formData.get('token') as string;
+  const hostname = new URL(request.url).hostname;
+  
+  if (!token) {
+    return new Response(JSON.stringify({ active: false }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  // Find session with this token
+  for (const session of sessions.values()) {
+    const tokenData = session.localOAuthTokens?.[hostname];
+    if (tokenData?.access_token === token) {
+      const active = tokenData.expires_at > Date.now();
+      return new Response(JSON.stringify({
+        active,
+        client_id: tokenData.client_id,
+        exp: Math.floor(tokenData.expires_at / 1000),
+        scope: 'mcp'
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+  
+  return new Response(JSON.stringify({ active: false }), {
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+function createDeviceSession(): SessionData {
+  return {
+    csrf: generateRandomString(32),
+    localAuth: false,
+    oauth: {},
+    deviceCodes: {}
+  };
+}
+
+function generateUserCode(): string {
+  // Generate 6-digit user code
+  return Math.random().toString(10).slice(2, 8).padStart(6, '0');
+}
+
+async function handleDeviceVerify(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const user_code = url.searchParams.get('user_code') || '';
+  
+  const html = `<!doctype html><html><head><title>Device Authorization</title></head><body>
+    <h1>Device Authorization</h1>
+    <p>To complete device authorization, please enter the code displayed on your device:</p>
+    <form method="POST" action="/oauth/device/verify">
+      <label>Device Code: <input name="user_code" value="${user_code}" placeholder="123456" required></label><br><br>
+      <button type="submit">Verify Device</button>
+    </form>
+    <p><a href="${getCurrentDomain(request)}/login">Sign in first</a> if not already authenticated.</p>
+  </body></html>`;
+  
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+async function handleDeviceVerifyPost(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const formData = await request.formData();
+  const user_code = formData.get('user_code') as string;
+  const hostname = new URL(request.url).hostname;
+  
+  if (!user_code) {
+    return new Response('User code is required', { status: 400 });
+  }
+  
+  // Check if user is authenticated
+  const sessionId = getSessionId(request);
+  const session = sessionId ? await getSession(sessionId, env) : null;
+  
+  if (!session || !session.localAuth) {
+    // Redirect to login with return URL
+    const returnUrl = `/oauth/device/verify?user_code=${encodeURIComponent(user_code)}`;
+    return Response.redirect(`https://${hostname}/login?return_to=${encodeURIComponent(returnUrl)}`, 302);
+  }
+  
+  // Find device code with this user code
+  let deviceFound = false;
+  for (const [sessionKey, deviceSession] of sessions.entries()) {
+    const devices = deviceSession.deviceCodes?.[hostname];
+    if (devices) {
+      for (const [device_code, deviceData] of Object.entries(devices)) {
+        if (deviceData.user_code === user_code) {
+          if (deviceData.expires_at < Date.now()) {
+            delete deviceSession.deviceCodes[hostname][device_code];
+            return new Response('Device code has expired. Please try again.', { status: 400 });
+          }
+          
+          // Authorize this device code
+          deviceSession.localAuth = true;
+          deviceSession.csrf = session.csrf; // Copy authenticated session data
+          deviceFound = true;
+          break;
+        }
+      }
+    }
+  }
+  
+  if (!deviceFound) {
+    return new Response('Invalid device code. Please check the code and try again.', { status: 400 });
+  }
+  
+  return new Response(`<!doctype html><html><head><title>Device Authorized</title></head><body>
+    <h1>Device Authorized Successfully</h1>
+    <p>Your device has been authorized. You can now return to your MCP client.</p>
+    <p>The authorization will complete automatically.</p>
+  </body></html>`, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+// Dynamic upstream OAuth discovery
+async function discoverUpstreamOAuth(domain: string): Promise<any | null> {
+  try {
+    const discoveryUrl = `https://${domain}/.well-known/oauth-authorization-server`;
+    const response = await fetch(discoveryUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'MCP-OAuth-Gateway/1.0'
+      }
+    });
+    
+    if (response.ok) {
+      const discovery = await response.json() as any;
+      // Validate required OAuth endpoints
+      if (discovery.authorization_endpoint && discovery.token_endpoint) {
+        return discovery;
+      }
+    }
+  } catch (error) {
+    // Discovery failed, server likely doesn't support OAuth
+    console.log(`OAuth discovery failed for ${domain}:`, error);
+  }
+  
+  return null;
+}
+
 // Upstream OAuth handlers
 async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -689,17 +1047,32 @@ async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
     return new Response('Missing server parameter', { status: 400 });
   }
   
-  // Get MCP server config
-  let mcpServers: MCPServerConfig[] = [];
+  // Try to get MCP server config, or discover dynamically
+  let serverConfig: MCPServerConfig | null = null;
+  
   try {
-    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
+    const mcpServers: MCPServerConfig[] = JSON.parse(env.MCP_SERVERS || '[]');
+    serverConfig = mcpServers.find(s => s.domain === serverDomain) || null;
   } catch (e) {
-    return new Response('Server configuration error', { status: 500 });
+    console.error('Failed to parse MCP_SERVERS:', e);
   }
   
-  const serverConfig = mcpServers.find(s => s.domain === serverDomain);
+  // If no pre-configured server, try dynamic discovery
   if (!serverConfig) {
-    return new Response('Unknown server', { status: 400 });
+    const upstreamOAuth = await discoverUpstreamOAuth(serverDomain);
+    if (!upstreamOAuth) {
+      return new Response('Server does not support OAuth or is not configured', { status: 400 });
+    }
+    
+    // Create dynamic server config
+    serverConfig = {
+      domain: serverDomain,
+      name: `Dynamic: ${serverDomain}`,
+      authzEndpoint: upstreamOAuth.authorization_endpoint,
+      tokenEndpoint: upstreamOAuth.token_endpoint,
+      clientId: 'mcp-gateway', // Default client ID
+      scopes: upstreamOAuth.scopes_supported?.[0] || 'openid'
+    };
   }
   
   // Get or create session
@@ -782,17 +1155,32 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
     return new Response('PKCE verifier not found', { status: 400 });
   }
   
-  // Get server config
-  let mcpServers: MCPServerConfig[] = [];
+  // Try to get server config, or discover dynamically
+  let serverConfig: MCPServerConfig | null = null;
+  
   try {
-    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
+    const mcpServers: MCPServerConfig[] = JSON.parse(env.MCP_SERVERS || '[]');
+    serverConfig = mcpServers.find(s => s.domain === serverDomain) || null;
   } catch (e) {
-    return new Response('Server configuration error', { status: 500 });
+    console.error('Failed to parse MCP_SERVERS:', e);
   }
   
-  const serverConfig = mcpServers.find(s => s.domain === serverDomain);
+  // If no pre-configured server, try dynamic discovery
   if (!serverConfig) {
-    return new Response('Unknown server', { status: 400 });
+    const upstreamOAuth = await discoverUpstreamOAuth(serverDomain);
+    if (!upstreamOAuth) {
+      return new Response('Server does not support OAuth or is not configured', { status: 400 });
+    }
+    
+    // Create dynamic server config
+    serverConfig = {
+      domain: serverDomain,
+      name: `Dynamic: ${serverDomain}`,
+      authzEndpoint: upstreamOAuth.authorization_endpoint,
+      tokenEndpoint: upstreamOAuth.token_endpoint,
+      clientId: 'mcp-gateway',
+      scopes: upstreamOAuth.scopes_supported?.[0] || 'openid'
+    };
   }
   
   // Exchange code for tokens
