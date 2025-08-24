@@ -355,20 +355,24 @@ function corsPreflight(request) {
 }
 
 function filterRequestHeaders(inHeaders) {
-  // Forward all headers verbatim except hop-by-hop and restricted ones
-  // We'll set the host header separately based on the upstream URL
-  const drop = new Set([
-    'connection','keep-alive','proxy-authenticate','proxy-authorization',
-    'te','trailer','transfer-encoding','upgrade','host',
-    'cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-ipcountry', // Remove Cloudflare-specific headers
-    'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip' // Remove proxy headers that might confuse upstream
+  // Only drop hop-by-hop headers that MUST be removed per HTTP spec
+  // Keep everything else for full transparency
+  const hopByHop = new Set([
+    'connection',
+    'keep-alive', 
+    'proxy-authenticate',
+    'proxy-authorization',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+    'host' // We'll set this based on the upstream URL
   ]);
   const out = new Headers();
   for (const [k, v] of inHeaders.entries()) {
     const key = k.toLowerCase();
-    if (drop.has(key)) continue;
-    if (key.startsWith('cf-')) continue; // Drop all CF headers
-    out.set(k, v);
+    if (hopByHop.has(key)) continue;
+    out.set(k, v); // Pass everything else through, including CF headers
   }
   return out;
 }
@@ -379,19 +383,28 @@ function copyForwardableHeaders(inHeaders, outHeaders) {
 }
 
 function filterResponseHeaders(inHeaders, { forceSSE = false } = {}) {
+  // Only drop hop-by-hop headers that MUST be removed per HTTP spec
   const hopByHop = new Set([
-    'connection','keep-alive','proxy-authenticate','proxy-authorization',
-    'te','trailer','transfer-encoding','upgrade'
+    'connection',
+    'keep-alive',
+    'proxy-authenticate',
+    'proxy-authorization',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade'
   ]);
   const out = new Headers();
   for (const [k, v] of inHeaders.entries()) {
     const key = k.toLowerCase();
     if (hopByHop.has(key)) continue;
-    out.set(k, v);
+    out.set(k, v); // Pass everything else through transparently
   }
-  // Minimal CORS for browser-based usage; does not modify upstream core headers
-  out.set('Access-Control-Allow-Origin', '*');
-  out.set('Vary', addVary(out.get('Vary'), 'Origin'));
+  // Only add CORS if not already present from upstream
+  if (!out.has('Access-Control-Allow-Origin')) {
+    out.set('Access-Control-Allow-Origin', '*');
+    out.set('Vary', addVary(out.get('Vary'), 'Origin'));
+  }
   return out;
 }
 
