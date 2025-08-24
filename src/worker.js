@@ -545,28 +545,23 @@ function parseHostEncodedUpstream(hostname, env) {
 
 
 function selectUpstreamForRequest(upstreamBase, reqUrl, request) {
-  // Heuristic: if GET + event-stream or requesting /v1/sse, go to exact upstreamBase;
-  // otherwise, route to upstream origin + incoming path
-  const wantsSSE = request.method.toUpperCase() === 'GET' && (
-    (request.headers.get('accept') || '').includes('text/event-stream') ||
-    reqUrl.pathname === '/v1/sse' || reqUrl.pathname.endsWith('/sse')
-  );
-  if (wantsSSE) {
-    const u = new URL(upstreamBase.href);
-    // Merge query from incoming
-    if (reqUrl.search) {
-      const qs = new URLSearchParams(reqUrl.search);
-      for (const [k, v] of qs.entries()) u.searchParams.set(k, v);
-    }
-    return u;
+  // Always preserve the incoming path when upstream is just a domain
+  // Only use the exact upstream path if it was encoded as a full URL with a path
+  const u = new URL(upstreamBase.href);
+  
+  // If the upstream has no path (just domain) or is root (/), use incoming path
+  if (!u.pathname || u.pathname === '/') {
+    u.pathname = reqUrl.pathname;
   }
-  const origin = new URL(upstreamBase.origin);
-  origin.pathname = reqUrl.pathname;
+  // Otherwise, the upstream was encoded with a specific path, so use it
+  
+  // Always merge query params from incoming request
   if (reqUrl.search) {
     const qs = new URLSearchParams(reqUrl.search);
-    for (const [k, v] of qs.entries()) origin.searchParams.set(k, v);
+    for (const [k, v] of qs.entries()) u.searchParams.set(k, v);
   }
-  return origin;
+  
+  return u;
 }
 
 async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
