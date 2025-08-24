@@ -84,23 +84,23 @@ export default {
           return badRequest('Invalid domain or URL input');
         }
         
-        // Use base64 encoding for the domain name
+        // Use base32 encoding for the domain name (DNS-safe)
         const domainRoot = env.DOMAIN_ROOT || 'copernicusone.com';
-        const encoded = toBase64Url(domainOnly);
+        const encoded = base32Encode(domainOnly);
         const domain_url = `https://${encoded}.${domainRoot}/`;
         
-        // Also provide base32 version for compatibility
-        const b32 = base32Encode(targetUrl);
-        const b32Host = b32ToHost(b32, domainRoot);
-        const b32_url = `https://${b32Host}/`;
+        // Also provide full URL base32 version
+        const fullB32 = base32Encode(targetUrl);
+        const fullB32Host = b32ToHost(fullB32, domainRoot);
+        const full_url = `https://${fullB32Host}/`;
         
         const resp = json({ 
           original: target, 
           domain: domainOnly,
-          base64_encoded: encoded,
-          base64_url: domain_url,
-          base32_encoded: b32,
-          base32_url: b32_url
+          base32_encoded: encoded,
+          domain_url: domain_url,
+          full_base32_encoded: fullB32,
+          full_url: full_url
         });
         
         log(rid, 'info', 'route:encode', { target, domain: domainOnly, encoded: encoded.substring(0, 20) + '...' }, lvl);
@@ -479,22 +479,34 @@ function parseHostEncodedUpstream(hostname, env) {
   if (parts.length <= rootParts.length) return null; // it's the root domain itself
   const encodedLabels = parts.slice(0, parts.length - rootParts.length);
   
-  // First try base64 decoding for single-label subdomains
+  // For single-label subdomains, try base32 decoding as domain name
   if (encodedLabels.length === 1) {
-    const b64Label = encodedLabels[0];
-    const decodedDomain = decodeBase64Url(b64Label);
+    const b32Label = encodedLabels[0];
+    const decodedDomain = base32Decode(b32Label);
     if (decodedDomain) {
-      try {
-        // The decoded value is just a domain name, so we need to add https://
-        const url = new URL('https://' + decodedDomain);
-        return { upstreamBase: url };
-      } catch {
-        // Fall through to base32 decoding
+      // Check if it's a valid domain name (contains dots, no protocol)
+      if (decodedDomain.includes('.') && !decodedDomain.includes('://')) {
+        try {
+          // The decoded value is just a domain name, so we need to add https://
+          const url = new URL('https://' + decodedDomain);
+          return { upstreamBase: url };
+        } catch {
+          // Not a valid domain, fall through
+        }
+      }
+      // Check if it's a full URL
+      if (decodedDomain.includes('://')) {
+        try {
+          const url = new URL(decodedDomain);
+          return { upstreamBase: url };
+        } catch {
+          // Not a valid URL, fall through
+        }
       }
     }
   }
   
-  // Then try base32 decoding (for multi-label or b32-prefixed)
+  // For multi-label subdomains (b32-prefixed), join and decode as full URL
   let joined = encodedLabels.join('');
   if (joined.startsWith('b32-')) joined = joined.slice(4);
   if (!joined) return null;
@@ -506,21 +518,6 @@ function parseHostEncodedUpstream(hostname, env) {
   } catch { return null; }
 }
 
-// Helper function to decode base64 URL-safe encoding
-function decodeBase64Url(b64u) {
-  try {
-    // Handle URL-safe base64 without padding
-    const normalized = b64u.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(b64u.length / 4) * 4, '=');
-    const str = atob(normalized);
-    // Check if it looks like a valid domain
-    if (/^[a-zA-Z0-9.-]+$/.test(str)) {
-      return str;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
 
 function selectUpstreamForRequest(upstreamBase, reqUrl, request) {
   // Heuristic: if GET + event-stream or requesting /v1/sse, go to exact upstreamBase;
@@ -694,15 +691,15 @@ function landingHTML(url, env) {
       }
       const u = new URL(targetUrl);
       
-      // Use base64 encoding for the domain name
+      // Use base32 encoding for the domain name (DNS-safe, case-insensitive)
       const domainOnly = u.hostname;
-      const encoded = toBase64Url(domainOnly);
+      const encoded = base32Encode(domainOnly);
       const domainUrl = `https://${encoded}.${domainRoot}/`;
       
-      // Also show base32 version for compatibility
-      const b32 = base32Encode(u.toString());
-      const b32Host = b32ToHost(b32, domainRoot);
-      const b32DomainUrl = `https://${b32Host}/`;
+      // Also show full URL base32 version for reference
+      const fullB32 = base32Encode(u.toString());
+      const fullB32Host = b32ToHost(fullB32, domainRoot);
+      const fullB32Url = `https://${fullB32Host}/`;
       
       preRendered = `
         <div class="row grid">
@@ -710,11 +707,11 @@ function landingHTML(url, env) {
           <button class="btn" onclick="copy(qs('#domain-input').textContent)">Copy</button>
         </div>
         <div class="row grid">
-          <div><div class="muted small">Base64 Encoded URL</div><div class="code box" id="domain">${escapeHtml(domainUrl)}</div></div>
+          <div><div class="muted small">Encoded URL (Base32)</div><div class="code box" id="domain">${escapeHtml(domainUrl)}</div></div>
           <button class="btn" onclick="copy(qs('#domain').textContent)">Copy</button>
         </div>
         <div class="row grid">
-          <div><div class="muted small">Base32 URL (Alternative)</div><div class="code box" id="b32domain">${escapeHtml(b32DomainUrl)}</div></div>
+          <div><div class="muted small">Full URL Encoded (Alternative)</div><div class="code box" id="b32domain">${escapeHtml(fullB32Url)}</div></div>
           <button class="btn" onclick="copy(qs('#b32domain').textContent)">Copy</button>
         </div>
         <div class="row">
@@ -751,19 +748,21 @@ function landingHTML(url, env) {
     a { color: inherit; }
   </style>
   <script>
-    function toBase64Url(str) {
-      const enc = new TextEncoder();
-      const bytes = enc.encode(str);
-      let bin = '';
-      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      const b64 = btoa(bin);
-      return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-    }
-    function fromBase64Url(b64u) {
-      const normalized = b64u.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(b64u.length / 4) * 4, '=');
-      const bin = atob(normalized);
-      const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
-      return new TextDecoder().decode(bytes);
+    const B32_ALPH = 'abcdefghijklmnopqrstuvwxyz234567';
+    
+    function base32Encode(str) {
+      const bytes = new TextEncoder().encode(str);
+      let bits = 0, value = 0, output = '';
+      for (let i = 0; i < bytes.length; i++) {
+        value = (value << 8) | bytes[i];
+        bits += 8;
+        while (bits >= 5) {
+          output += B32_ALPH[(value >>> (bits - 5)) & 31];
+          bits -= 5;
+        }
+      }
+      if (bits > 0) output += B32_ALPH[(value << (5 - bits)) & 31];
+      return output;
     }
     function qs(sel){ return document.querySelector(sel); }
     function copy(text){
@@ -798,8 +797,8 @@ function landingHTML(url, env) {
         // Assume it's a domain name
       }
       
-      // Generate the base64 encoded URL
-      const encoded = toBase64Url(domain);
+      // Generate the base32 encoded URL (DNS-safe, case-insensitive)
+      const encoded = base32Encode(domain);
       const domainUrl = 'https://' + encoded + '.' + domainRoot + '/';
       
       out.innerHTML = \`
