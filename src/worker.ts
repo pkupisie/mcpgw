@@ -42,15 +42,15 @@ interface MCPRouteInfo {
   serverDomain: string;
 }
 
+// In-memory session storage (resets on worker restart)
+const sessions = new Map<string, SessionData>();
+
 // Environment bindings
 interface Env {
   DOMAIN_ROOT: string;
   LOCAL_USER: string;
   LOCAL_PASSWORD: string;
-  SESSION_SECRET: string;
-  TOKEN_ENCRYPTION_KEY: string;
   MCP_SERVERS: string;
-  SESSIONS: KVNamespace;
 }
 
 export default {
@@ -293,7 +293,16 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     oauth: {}
   };
   
-  await env.SESSIONS.put(sessionId, JSON.stringify(session), { expirationTtl: 28800 }); // 8 hours
+  sessions.set(sessionId, session);
+  
+  // Clean up old sessions periodically (simple memory management)
+  if (sessions.size > 1000) {
+    // Remove oldest sessions when we hit 1000
+    const entries = Array.from(sessions.entries());
+    for (let i = 0; i < 100; i++) {
+      sessions.delete(entries[i][0]);
+    }
+  }
   
   const response = Response.redirect(`https://${env.DOMAIN_ROOT}/`, 302);
   response.headers.set('Set-Cookie', `session=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`);
@@ -396,14 +405,7 @@ function getSessionId(request: Request): string | null {
 }
 
 async function getSession(sessionId: string, env: Env): Promise<SessionData | null> {
-  const sessionData = await env.SESSIONS.get(sessionId);
-  if (!sessionData) return null;
-  
-  try {
-    return JSON.parse(sessionData);
-  } catch {
-    return null;
-  }
+  return sessions.get(sessionId) || null;
 }
 
 function generateSessionId(): string {

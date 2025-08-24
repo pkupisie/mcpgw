@@ -7,14 +7,6 @@
   },
   "observability": { "enabled": true },
   "vars": {
-    "DOMAIN_ROOT": "copernicusone.com",
-    "LOG_LEVEL": "info"
-  },
-  "kv_namespaces": [
-    {
-      "binding": "SESSIONS",
-      "id": "your-kv-namespace-id",
-      "preview_id": "your-preview-kv-namespace-id"
-    }
-  ]
+    "DOMAIN_ROOT": "copernicusone.com"
+  }
 }
