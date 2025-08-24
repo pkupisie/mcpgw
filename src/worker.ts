@@ -73,7 +73,7 @@ export default {
       
       if (hostRoute) {
         // Check if this is a local OAuth request
-        if (url.pathname.startsWith('/.well-known/oauth-authorization-server')) {
+        if (url.pathname === '/.well-known/oauth-authorization-server') {
           return handleOAuthDiscovery(request, hostRoute, env);
         }
         
