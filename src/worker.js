@@ -29,12 +29,12 @@ export default {
         cf_ray: request.headers.get('cf-ray') || 'none',
       }, lvl);
       
-      log(rid, 'debug', 'request:headers', {
-        origin: request.headers.get('origin'),
-        accept: request.headers.get('accept'),
-        content_type: request.headers.get('content-type'),
-        ua: request.headers.get('user-agent'),
-      }, lvl);
+      // Log all incoming request headers for debugging
+      const incomingHeaders = {};
+      for (const [k, v] of request.headers.entries()) {
+        incomingHeaders[k] = k.toLowerCase() === 'authorization' || k.toLowerCase() === 'cookie' ? 'REDACTED' : v;
+      }
+      log(rid, 'debug', 'request:headers', incomingHeaders, lvl);
 
       // Check if this is the landing page subdomain
       const isLandingDomain = url.hostname.toLowerCase() === 'mcp.copernicusone.com';
@@ -573,11 +573,24 @@ async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
     body_len: request.headers.get('content-length') || '0',
   }, lvl);
   
-  log(rid, 'debug', 'upstream:headers', {
-    accept: init.headers.get('accept'),
-    content_type: init.headers.get('content-type'),
-    authorization: init.headers.get('authorization') ? 'present' : 'none',
-  }, lvl);
+  // Log all request headers for debugging
+  const reqHeadersObj = {};
+  for (const [k, v] of init.headers.entries()) {
+    reqHeadersObj[k] = k.toLowerCase() === 'authorization' ? 'REDACTED' : v;
+  }
+  log(rid, 'debug', 'upstream:request-headers', reqHeadersObj, lvl);
+  
+  // Log request body if it's not too large and it's JSON
+  if (init.body && request.headers.get('content-type')?.includes('application/json')) {
+    try {
+      const bodyText = await request.clone().text();
+      if (bodyText.length < 5000) { // Only log if under 5KB
+        log(rid, 'debug', 'upstream:request-body', { body: bodyText }, lvl);
+      }
+    } catch (e) {
+      // Body already read or other error, skip logging
+    }
+  }
   
   let upstreamResp;
   try {
@@ -607,12 +620,31 @@ async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
     elapsed_ms: elapsed,
   }, lvl);
   
+  // Log all response headers for debugging
+  const respHeadersObj = {};
+  for (const [k, v] of upstreamResp.headers.entries()) {
+    respHeadersObj[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
+  }
+  log(rid, 'debug', 'upstream:response-headers', respHeadersObj, lvl);
+  
   if (upstreamResp.status >= 400) {
     log(rid, 'warn', 'upstream:error-status', {
       status: upstreamResp.status,
       url: redactURL(upstreamURL).toString(),
       elapsed_ms: elapsed,
     }, lvl);
+    
+    // Log error response body for debugging
+    if (contentType?.includes('application/json') || contentType?.includes('text/')) {
+      try {
+        const errorBody = await upstreamResp.clone().text();
+        if (errorBody.length < 5000) { // Only log if under 5KB
+          log(rid, 'debug', 'upstream:error-body', { body: errorBody }, lvl);
+        }
+      } catch (e) {
+        // Body already read or other error, skip logging
+      }
+    }
   }
   
   return new Response(upstreamResp.body, {
