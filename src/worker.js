@@ -114,6 +114,7 @@ export default {
       const contentType = upstreamResp.headers.get('content-type') || '';
       const isSSE = contentType.includes('text/event-stream');
       const respHeaders = filterResponseHeaders(upstreamResp.headers, { forceSSE: isSSE });
+      try { respHeaders.set('x-mcp-request-id', rid); } catch {}
       log(rid, 'debug', 'upstream:response', {
         status: upstreamResp.status,
         content_type: contentType || null,
