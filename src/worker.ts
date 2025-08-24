@@ -660,6 +660,10 @@ async function handleLocalOAuth(request: Request, hostRoute: MCPRouteInfo, env: 
     if (request.method === 'POST') return handleClientRegistration(request, hostRoute, env);
   }
   
+  if (url.pathname === '/oauth/callback') {
+    return handleOAuthCallback(request, env);
+  }
+  
   return new Response('OAuth endpoint not found', { status: 404 });
 }
 
