@@ -140,6 +140,10 @@ export default {
           return handleOAuthDiscovery(request, hostRoute, env);
         }
         
+        if (url.pathname === '/.well-known/oauth-authorization-server/sse') {
+          return handleOAuthDiscovery(request, hostRoute, env);
+        }
+        
         if (url.pathname === '/.well-known/oauth-protected-resource') {
           return handleProtectedResourceMetadata(request, hostRoute, env);
         }
@@ -248,23 +252,32 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   const userAgent = request.headers.get('user-agent');
   const authHeader = request.headers.get('Authorization');
   
-  // If it's an MCP client without auth, reject and force OAuth
+  // If it's an MCP client without auth, check if it's accessing public endpoints
   if (mcpProtocolVersion && (!authHeader || !authHeader.startsWith('Bearer '))) {
-    console.log('MCP client detected without OAuth - requiring authentication');
+    console.log('MCP client detected without OAuth');
     console.log(`MCP Protocol: ${mcpProtocolVersion}, Auth header: ${authHeader || 'none'}, User-Agent: ${userAgent}`);
     
-    // Always require authentication for MCP clients
-    return new Response(JSON.stringify({ 
-      error: 'authentication_required',
-      error_description: 'OAuth authentication is required for MCP access',
-      authUrl: `https://${getCurrentDomain(request)}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`
-    }), { 
-      status: 401,
-      headers: { 
-        'Content-Type': 'application/json',
-        'WWW-Authenticate': 'Bearer realm="MCP Gateway"'
-      }
-    });
+    const url = new URL(request.url);
+    
+    // Allow unauthenticated access to OAuth discovery and flow endpoints
+    if (url.pathname.startsWith('/.well-known/') || url.pathname.startsWith('/oauth/')) {
+      console.log(`Allowing unauthenticated access to public endpoint: ${url.pathname}`);
+      // Continue to normal handling - these should be handled above this point
+    } else {
+      // Require authentication for actual MCP data endpoints
+      console.log(`Requiring authentication for MCP data endpoint: ${url.pathname}`);
+      return new Response(JSON.stringify({ 
+        error: 'authentication_required',
+        error_description: 'OAuth authentication is required for MCP data access',
+        authUrl: `https://${getCurrentDomain(request)}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`
+      }), { 
+        status: 401,
+        headers: { 
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'Bearer realm="MCP Gateway"'
+        }
+      });
+    }
   }
   
   // Removed public proxy mode - now requiring authentication for all MCP clients
