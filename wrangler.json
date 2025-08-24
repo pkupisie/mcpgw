@@ -1,5 +1,5 @@
 {
-  "name": "mcp-oauth-gateway",
+  "name": "mcp",
   "compatibility_date": "2025-08-18",
   "main": "dist/worker.js",
   "build": {
