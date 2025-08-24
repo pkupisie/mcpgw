@@ -251,6 +251,7 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   // If it's an MCP client without auth, try public proxy mode first
   if (mcpProtocolVersion && (!authHeader || !authHeader.startsWith('Bearer '))) {
     console.log('MCP client detected without OAuth, trying public proxy mode');
+    console.log(`MCP Protocol: ${mcpProtocolVersion}, Auth header: ${authHeader || 'none'}, User-Agent: ${userAgent}`);
     
     // Try proxying to upstream without authentication
     const upstreamUrl = new URL(request.url.replace(request.url.split('/')[2], hostRoute.upstreamBase.host));
