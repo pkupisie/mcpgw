@@ -11,16 +11,46 @@
 
 import { base32Encode, base32Decode } from './encoding';
 
-// Types (minimal for pure proxy mode)
+// Types
+interface MCPServerConfig {
+  domain: string;
+  name: string;
+  authzEndpoint: string;
+  tokenEndpoint: string;
+  clientId: string;
+  clientSecret?: string;
+  scopes: string;
+}
+
+interface SessionData {
+  csrf: string;
+  localAuth: boolean;
+  oauth?: {
+    [serverDomain: string]: {
+      tokens?: {
+        access_token: string;
+        refresh_token?: string;
+        expires_in?: number;
+      };
+      expiresAt?: number;
+    };
+  };
+}
 
 interface MCPRouteInfo {
   upstreamBase: URL;
   serverDomain: string;
 }
 
+// In-memory session storage (resets on worker restart)
+const sessions = new Map<string, SessionData>();
+
 // Environment bindings
 interface Env {
   DOMAIN_ROOT: string;
+  LOCAL_USER: string;
+  LOCAL_PASSWORD: string;
+  MCP_SERVERS: string;
 }
 
 export default {
@@ -45,11 +75,22 @@ export default {
           return handleDashboard(request, env);
         }
         
+        if (url.pathname === '/login') {
+          if (request.method === 'GET') return handleLoginPage();
+          if (request.method === 'POST') return handleLogin(request, env);
+        }
         
         if (url.pathname === '/encode') {
           return handleEncode(request, env);
         }
         
+        if (url.pathname === '/oauth/start') {
+          return handleOAuthStart(request, env);
+        }
+        
+        if (url.pathname === '/oauth/callback') {
+          return handleOAuthCallback(request, env);
+        }
       }
       
       return new Response('Not found', { status: 404 });
@@ -103,8 +144,44 @@ function parseHostEncodedUpstream(hostname: string, domainRoot: string): MCPRout
   return null;
 }
 
-// MCP request handler - simple proxy
+// MCP request handler
 async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  // Get session
+  const sessionId = getSessionId(request);
+  if (!sessionId) {
+    return new Response(JSON.stringify({ 
+      error: 'Authentication required',
+      loginUrl: `https://${env.DOMAIN_ROOT}/login`
+    }), { 
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  const session = await getSession(sessionId, env);
+  if (!session || !session.localAuth) {
+    return new Response(JSON.stringify({ 
+      error: 'Authentication required',
+      loginUrl: `https://${env.DOMAIN_ROOT}/login`
+    }), { 
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  // Check OAuth tokens for this server
+  const serverData = session.oauth?.[hostRoute.serverDomain];
+  if (!serverData?.tokens) {
+    return new Response(JSON.stringify({ 
+      error: 'OAuth required for server',
+      server: hostRoute.serverDomain,
+      authUrl: `https://${env.DOMAIN_ROOT}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`
+    }), { 
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
   // Build upstream request
   const upstreamUrl = new URL(request.url.replace(request.url.split('/')[2], hostRoute.upstreamBase.host));
   
@@ -112,6 +189,7 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   request.headers.forEach((value, key) => {
     upstreamHeaders[key] = value;
   });
+  upstreamHeaders['Authorization'] = `Bearer ${serverData.tokens.access_token}`;
   upstreamHeaders['Host'] = hostRoute.upstreamBase.hostname;
 
   const upstreamRequest = new Request(upstreamUrl.toString(), {
@@ -121,26 +199,63 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   });
   
   // Forward request
-  return await fetch(upstreamRequest);
+  const response = await fetch(upstreamRequest);
+  
+  // Handle token refresh on 401
+  if (response.status === 401 && serverData.tokens.refresh_token) {
+    // TODO: Implement token refresh
+    console.log('Token refresh needed for', hostRoute.serverDomain);
+  }
+  
+  return response;
 }
 
-// Dashboard - public access for URL encoding
+// Dashboard
 async function handleDashboard(request: Request, env: Env): Promise<Response> {
+  const sessionId = getSessionId(request);
+  const session = sessionId ? await getSession(sessionId, env) : null;
+  
+  if (!session || !session.localAuth) {
+    return Response.redirect(`https://${env.DOMAIN_ROOT}/login`, 302);
+  }
+  
+  // Parse MCP servers
+  let mcpServers: MCPServerConfig[] = [];
+  try {
+    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
+  } catch (e) {
+    console.error('Failed to parse MCP_SERVERS:', e);
+  }
+  
+  let serversHtml = '<h2>MCP Servers</h2>';
+  if (mcpServers.length === 0) {
+    serversHtml += '<p>No MCP servers configured.</p>';
+  } else {
+    serversHtml += '<ul>';
+    for (const server of mcpServers) {
+      const isConnected = !!(session.oauth?.[server.domain]?.tokens);
+      const encodedHostname = generateEncodedHostname(server.domain, env.DOMAIN_ROOT);
+      const encodedUrl = `https://${encodedHostname}/`;
+      serversHtml += `
+        <li>
+          <strong>${server.name}</strong> (${server.domain}) 
+          ${isConnected ? '✅ Connected' : '❌ Not connected'}
+          <br><small>URL: <code>${encodedUrl}</code></small>
+          ${!isConnected ? `<br><a href="/oauth/start?server=${encodeURIComponent(server.domain)}">Connect</a>` : ''}
+        </li>`;
+    }
+    serversHtml += '</ul>';
+  }
   
   const html = `<!doctype html><html><head><title>MCP Gateway</title></head><body>
-    <h1>MCP Proxy Gateway</h1>
+    <h1>MCP OAuth Gateway</h1>
     <p>Domain root: <code>${env.DOMAIN_ROOT}</code></p>
-    <h2>Generate MCP URL</h2>
-    <p>Enter any MCP server domain to generate a proxy URL:</p>
+    ${serversHtml}
+    <h3>Add New Server</h3>
     <form method="GET" action="/encode">
-      <label>MCP Server Domain: <input name="domain" placeholder="mcp.atlassian.com" required></label>
-      <button type="submit">Generate Proxy URL</button>
+      <label>Domain: <input name="domain" placeholder="mcp.example.com" required></label>
+      <button type="submit">Generate URL</button>
     </form>
-    <hr>
-    <h3>How it works:</h3>
-    <p>This gateway creates proxy URLs that encode the target MCP server in the hostname.</p>
-    <p>Example: <code>mcp.atlassian.com</code> → <code>base32-encoded-hostname.${env.DOMAIN_ROOT}</code></p>
-    <p>Use the generated URLs directly in Claude.ai or ChatGPT - they handle authentication.</p>
   </body></html>`;
   
   return new Response(html, {
@@ -148,7 +263,102 @@ async function handleDashboard(request: Request, env: Env): Promise<Response> {
   });
 }
 
+// Login handlers
+function handleLoginPage(): Response {
+  const html = `<!doctype html><html><body>
+    <h1>MCP Gateway Login</h1>
+    <form method="POST" action="/login">
+      <label>User: <input name="user" required></label><br><br>
+      <label>Pass: <input name="pass" type="password" required></label><br><br>
+      <button type="submit">Sign in</button>
+    </form>
+  </body></html>`;
+  
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
 
+async function handleLogin(request: Request, env: Env): Promise<Response> {
+  const formData = await request.formData();
+  const user = formData.get('user') as string;
+  const pass = formData.get('pass') as string;
+  
+  if (user !== env.LOCAL_USER || pass !== env.LOCAL_PASSWORD) {
+    return new Response('Invalid credentials', { status: 401 });
+  }
+  
+  // Create session
+  const sessionId = generateSessionId();
+  const session: SessionData = {
+    csrf: generateRandomString(32),
+    localAuth: true,
+    oauth: {}
+  };
+  
+  sessions.set(sessionId, session);
+  
+  // Clean up old sessions periodically (simple memory management)
+  if (sessions.size > 1000) {
+    // Remove oldest sessions when we hit 1000
+    const entries = Array.from(sessions.entries());
+    for (let i = 0; i < 100; i++) {
+      sessions.delete(entries[i][0]);
+    }
+  }
+  
+  const response = Response.redirect(`https://${env.DOMAIN_ROOT}/`, 302);
+  response.headers.set('Set-Cookie', `session=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`);
+  
+  return response;
+}
+
+// OAuth handlers
+async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const serverDomain = url.searchParams.get('server');
+  
+  if (!serverDomain) {
+    return new Response('Missing server parameter', { status: 400 });
+  }
+  
+  // Get MCP server config
+  let mcpServers: MCPServerConfig[] = [];
+  try {
+    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
+  } catch (e) {
+    return new Response('Server configuration error', { status: 500 });
+  }
+  
+  const serverConfig = mcpServers.find(s => s.domain === serverDomain);
+  if (!serverConfig) {
+    return new Response('Unknown server', { status: 400 });
+  }
+  
+  // Generate OAuth URL
+  const state = generateRandomString(16);
+  const verifier = generateRandomString(32);
+  const challenge = await sha256Base64Url(verifier);
+  
+  const authUrl = new URL(serverConfig.authzEndpoint);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('client_id', serverConfig.clientId);
+  authUrl.searchParams.set('redirect_uri', `https://${env.DOMAIN_ROOT}/oauth/callback`);
+  authUrl.searchParams.set('scope', serverConfig.scopes);
+  authUrl.searchParams.set('state', `${serverDomain}:${state}`);
+  authUrl.searchParams.set('code_challenge', challenge);
+  authUrl.searchParams.set('code_challenge_method', 'S256');
+  
+  // Store PKCE verifier (simplified - in production use KV or encrypt in state)
+  // TODO: Store verifier securely
+  
+  return Response.redirect(authUrl.toString(), 302);
+}
+
+async function handleOAuthCallback(request: Request, env: Env): Promise<Response> {
+  // TODO: Implement OAuth callback
+  return new Response('OAuth callback - TODO: Implement token exchange', { status: 501 });
+}
 
 // Encode handler
 async function handleEncode(request: Request, env: Env): Promise<Response> {
@@ -182,5 +392,43 @@ function generateEncodedHostname(domain: string, domainRoot: string): string {
   return `${encoded}-enc.${domainRoot}`;
 }
 
-// No session management needed for pure proxy mode
+function getSessionId(request: Request): string | null {
+  const cookieHeader = request.headers.get('Cookie');
+  if (!cookieHeader) return null;
+  
+  const cookies: Record<string, string> = {};
+  cookieHeader.split(';').forEach(c => {
+    const [key, ...value] = c.trim().split('=');
+    if (key && value.length > 0) {
+      cookies[key] = value.join('=');
+    }
+  });
+  
+  return cookies.session || null;
+}
 
+async function getSession(sessionId: string, env: Env): Promise<SessionData | null> {
+  return sessions.get(sessionId) || null;
+}
+
+function generateSessionId(): string {
+  return generateRandomString(32);
+}
+
+function generateRandomString(length: number): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+async function sha256Base64Url(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return btoa(String.fromCharCode(...new Uint8Array(hash)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+}
