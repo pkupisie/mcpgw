@@ -19,6 +19,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@wong2/mcp-cli": "^1.13.0",
     "wrangler": "^4.32.0"
   },
   "devDependencies": {

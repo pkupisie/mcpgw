@@ -490,6 +490,7 @@ async function handleOAuthDiscovery(request: Request, hostRoute: MCPRouteInfo, e
     device_authorization_endpoint: `https://${hostname}/oauth/device`,
     revocation_endpoint: `https://${hostname}/oauth/revoke`,
     introspection_endpoint: `https://${hostname}/oauth/introspect`,
+    registration_endpoint: `https://${hostname}/oauth/register`,
     
     // MCP-required fields
     response_types_supported: ['code'],
@@ -593,6 +594,10 @@ async function handleLocalOAuth(request: Request, hostRoute: MCPRouteInfo, env: 
   if (url.pathname === '/oauth/device/verify') {
     if (request.method === 'GET') return handleDeviceVerify(request, hostRoute, env);
     if (request.method === 'POST') return handleDeviceVerifyPost(request, hostRoute, env);
+  }
+  
+  if (url.pathname === '/oauth/register') {
+    if (request.method === 'POST') return handleClientRegistration(request, hostRoute, env);
   }
   
   return new Response('OAuth endpoint not found', { status: 404 });
@@ -1067,6 +1072,64 @@ async function handleDeviceVerify(request: Request, hostRoute: MCPRouteInfo, env
   return new Response(html, {
     headers: { 'Content-Type': 'text/html' }
   });
+}
+
+// RFC 7591 Dynamic Client Registration
+async function handleClientRegistration(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  try {
+    const registrationData = await request.json() as any;
+    
+    // Generate client credentials
+    const client_id = generateRandomString(16);
+    const client_secret = generateRandomString(32);
+    const issued_at = Math.floor(Date.now() / 1000);
+    
+    // Basic validation of required fields
+    const redirect_uris = registrationData.redirect_uris;
+    if (!redirect_uris || !Array.isArray(redirect_uris) || redirect_uris.length === 0) {
+      return new Response(JSON.stringify({
+        error: 'invalid_redirect_uri',
+        error_description: 'redirect_uris is required and must be a non-empty array'
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Create client registration response (RFC 7591)
+    const response = {
+      client_id,
+      client_secret,
+      client_id_issued_at: issued_at,
+      client_secret_expires_at: 0, // Non-expiring
+      redirect_uris: redirect_uris,
+      client_name: registrationData.client_name || 'MCP Client',
+      client_uri: registrationData.client_uri,
+      logo_uri: registrationData.logo_uri,
+      scope: registrationData.scope || 'mcp',
+      grant_types: registrationData.grant_types || ['authorization_code', 'refresh_token'],
+      response_types: registrationData.response_types || ['code'],
+      token_endpoint_auth_method: registrationData.token_endpoint_auth_method || 'client_secret_post'
+    };
+    
+    return new Response(JSON.stringify(response), {
+      status: 201,
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        'Pragma': 'no-cache'
+      }
+    });
+    
+  } catch (error) {
+    return new Response(JSON.stringify({
+      error: 'invalid_request',
+      error_description: 'Invalid JSON in request body'
+    }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
 }
 
 async function handleDeviceVerifyPost(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
