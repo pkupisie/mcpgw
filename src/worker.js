@@ -14,13 +14,26 @@ export default {
       const url = new URL(request.url);
 
       // Health and root info
-      if (url.pathname === '/' || url.pathname === '') {
-        return json({
-          ok: true,
-          message: 'MCP MITM proxy is up',
-          usage: 'GET/POST/WS: /<base64url-encoded-full-upstream-url>',
-          example: '/aHR0cHM6Ly9tY3AuYXRsYXNzaWFuLmNvbS92MS9zc2U',
-        });
+      if (url.pathname === '/' || url.pathname === '' || url.pathname === '/index.html') {
+        // Simple content-negotiation: if client prefers JSON, return JSON; else HTML landing
+        const accept = request.headers.get('accept') || '';
+        if (/application\/json/i.test(accept)) {
+          return json({
+            ok: true,
+            message: 'MCP MITM proxy is up',
+            usage: 'GET/POST/WS: /<base64url-encoded-full-upstream-url>',
+            example: '/aHR0cHM6Ly9tY3AuYXRsYXNzaWFuLmNvbS92MS9zc2U',
+          });
+        }
+        return landingHTML(url);
+      }
+      if (url.pathname === '/encode') {
+        const target = url.searchParams.get('url') || '';
+        if (!target) return badRequest('Missing url param');
+        let encoded = '';
+        try { encoded = toBase64Url(target); } catch (e) { return badRequest('Invalid URL input'); }
+        const worker = `${url.origin}/${encoded}`;
+        return json({ original: target, encoded, worker_url: worker });
       }
       if (url.pathname === '/healthz') return json({ ok: true });
 
@@ -257,3 +270,123 @@ function badRequest(msg) {
   return json({ error: msg }, 400);
 }
 
+function html(body, status = 200) {
+  const headers = new Headers({
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  return new Response(body, { status, headers });
+}
+
+function toBase64Url(str) {
+  const enc = new TextEncoder();
+  const bytes = enc.encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  const b64 = btoa(bin);
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function escapeHtml(unsafe) {
+  return unsafe
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function landingHTML(url) {
+  const origin = url.origin;
+  const example = 'https://mcp.atlassian.com/v1/sse';
+  return html(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MCP MITM Proxy</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; line-height: 1.45; }
+    .wrap { max-width: 860px; margin: 0 auto; }
+    h1 { font-size: 1.6rem; margin: 0 0 1rem; }
+    input[type=url] { width: 100%; padding: .6rem .7rem; font-size: 1rem; border-radius: .5rem; border: 1px solid #bbb; background: transparent; }
+    .row { margin: 1rem 0; }
+    .muted { opacity: .75; font-size: .9rem; }
+    code, .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .box { border: 1px solid #bbb; border-radius: .5rem; padding: .75rem; }
+    .btn { display: inline-block; padding: .45rem .7rem; border: 1px solid #777; border-radius: .375rem; cursor: pointer; background: transparent; }
+    .grid { display: grid; grid-template-columns: 1fr auto; gap: .5rem; align-items: center; }
+    .small { font-size: .85rem; }
+    a { color: inherit; }
+  </style>
+  <script>
+    function toBase64Url(str) {
+      const enc = new TextEncoder();
+      const bytes = enc.encode(str);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      const b64 = btoa(bin);
+      return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    }
+    function fromBase64Url(b64u) {
+      const normalized = b64u.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(b64u.length / 4) * 4, '=');
+      const bin = atob(normalized);
+      const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+      return new TextDecoder().decode(bytes);
+    }
+    function qs(sel){ return document.querySelector(sel); }
+    function copy(text){ navigator.clipboard?.writeText(text); }
+    function update(){
+      const input = qs('#target');
+      const raw = input.value.trim();
+      const out = qs('#out');
+      const url = new URL(window.location.href);
+      if(!raw){ out.innerHTML = '<em class="muted">Enter a full MCP server URL to get started</em>'; return; }
+      let encoded = '';
+      try { new URL(raw); encoded = toBase64Url(raw); }
+      catch(e){ out.innerHTML = '<span style="color:#c00">Invalid URL</span>'; return; }
+      const worker = url.origin + '/' + encoded;
+      const curlSse = 'curl -N ' + worker;
+      const curlPost = 'curl -s ' + worker + ' -H \"content-type: application/json\" -d \"{}\"';
+      out.innerHTML = `
+        <div class="row grid">
+          <div><div class="muted small">Encoded segment</div><div class="code box" id="enc">${encoded}</div></div>
+          <button class="btn" onclick="copy(qs('#enc').textContent)">Copy</button>
+        </div>
+        <div class="row grid">
+          <div><div class="muted small">Worker URL</div><div class="code box" id="worker">${worker}</div></div>
+          <button class="btn" onclick="copy(qs('#worker').textContent)">Copy</button>
+        </div>
+        <div class="row">
+          <div class="muted">Quick commands</div>
+          <div class="box small code" style="overflow:auto">
+            <div>$ ${curlSse}</div>
+            <div class="muted"># POST example</div>
+            <div>$ ${curlPost}</div>
+          </div>
+        </div>
+        <div class="row small muted">Tip: Append extra path or query after the encoded segment, e.g. if you encoded only the origin.</div>
+      `;
+    }
+    addEventListener('DOMContentLoaded', () => {
+      qs('#target').addEventListener('input', update);
+      update();
+    });
+  </script>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>MCP MITM Proxy</h1>
+      <div class="muted">Origin: <code>${origin}</code></div>
+      <div class="row">
+        <label for="target">Enter the full upstream MCP URL</label>
+        <input id="target" type="url" placeholder="e.g. ${example}" spellcheck="false" />
+        <div class="small muted">Only TLS upstreams are allowed by default (https:, wss:).</div>
+      </div>
+      <div id="out" class="row"></div>
+      <div class="row small muted">API: <code>GET ${origin}/encode?url=&lt;full-url&gt;</code> returns JSON.</div>
+    </div>
+  </body>
+  </html>`);
+}
