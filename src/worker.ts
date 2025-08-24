@@ -67,6 +67,28 @@ interface MCPRouteInfo {
 // In-memory session storage (resets on worker restart)
 const sessions = new Map<string, SessionData>();
 
+// Global authorization code store
+const authorizationCodes = new Map<string, {
+  client_id: string;
+  redirect_uri: string;
+  scope: string;
+  code_challenge: string;
+  code_challenge_method: string;
+  resource: string;
+  domain: string;
+  sessionId: string;
+  expires_at: number;
+}>();
+
+// Global access token store
+const accessTokens = new Map<string, {
+  client_id: string;
+  sessionId: string;
+  domain: string;
+  expires_at: number;
+  scope: string;
+}>();
+
 // Environment bindings
 interface Env {
   DOMAIN_ROOT: string;
@@ -260,34 +282,46 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   
   const localToken = authHeader.slice(7); // Remove 'Bearer '
   
-  // Find session with this local token
-  let sessionWithToken: SessionData | null = null;
-  for (const session of sessions.values()) {
-    const tokenData = session.localOAuthTokens?.[hostname];
-    if (tokenData?.access_token === localToken) {
-      if (tokenData.expires_at > Date.now()) {
-        sessionWithToken = session;
-        break;
-      } else {
-        // Token expired
-        return new Response(JSON.stringify({ 
-          error: 'invalid_token',
-          error_description: 'Token expired'
-        }), { 
-          status: 401,
-          headers: { 
-            'Content-Type': 'application/json',
-            'WWW-Authenticate': 'Bearer error="invalid_token"'
-          }
-        });
+  // Look up token in global store
+  const tokenData = accessTokens.get(localToken);
+  
+  if (!tokenData) {
+    return new Response(JSON.stringify({ 
+      error: 'invalid_token',
+      error_description: 'Invalid token'
+    }), { 
+      status: 401,
+      headers: { 
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': 'Bearer error="invalid_token"'
       }
-    }
+    });
   }
+  
+  // Check if token expired
+  if (tokenData.expires_at < Date.now()) {
+    // Clean up expired token
+    accessTokens.delete(localToken);
+    
+    return new Response(JSON.stringify({ 
+      error: 'invalid_token',
+      error_description: 'Token expired'
+    }), { 
+      status: 401,
+      headers: { 
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': 'Bearer error="invalid_token"'
+      }
+    });
+  }
+  
+  // Get the session for upstream token lookup
+  const sessionWithToken = sessions.get(tokenData.sessionId);
   
   if (!sessionWithToken || !sessionWithToken.localAuth) {
     return new Response(JSON.stringify({ 
       error: 'invalid_token',
-      error_description: 'Invalid or expired token'
+      error_description: 'Session not found or not authenticated'
     }), { 
       status: 401,
       headers: { 
@@ -691,13 +725,9 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
     return new Response('Session expired', { status: 401 });
   }
   
-  // Store authorization code data
+  // Store authorization code data globally
   const hostname = new URL(request.url).hostname;
-  if (!session.localOAuthTokens) {
-    session.localOAuthTokens = {};
-  }
   
-  // Store code temporarily (in practice, use a separate code store)
   const codeData = {
     client_id: formData.get('client_id') as string,
     redirect_uri: formData.get('redirect_uri') as string,
@@ -706,11 +736,12 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
     code_challenge_method: formData.get('code_challenge_method') as string,
     resource: formData.get('resource') as string, // RFC 8707 resource parameter
     domain: hostname,
+    sessionId: sessionId!,
     expires_at: Date.now() + 600000 // 10 minutes
   };
   
-  // Store in session temporarily (TODO: use proper storage)
-  (session as any)[`code_${code}`] = codeData;
+  // Store code globally for cross-session access
+  authorizationCodes.set(code, codeData);
   
   // Redirect back to client
   const redirectUrl = new URL(formData.get('redirect_uri') as string);
@@ -731,26 +762,34 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     const redirect_uri = formData.get('redirect_uri') as string;
     const code_verifier = formData.get('code_verifier') as string;
     
-    // Find session with this code (simplified - in practice use proper storage)
-    let codeData: any = null;
-    let sessionWithCode: SessionData | null = null;
+    // Look up code in global store
+    const codeData = authorizationCodes.get(code);
     
-    for (const [sessionId, session] of sessions.entries()) {
-      const stored = (session as any)[`code_${code}`];
-      if (stored && stored.expires_at > Date.now()) {
-        codeData = stored;
-        sessionWithCode = session;
-        delete (session as any)[`code_${code}`]; // One-time use
-        break;
-      }
-    }
-    
-    if (!codeData) {
-      return new Response(JSON.stringify({ error: 'invalid_grant' }), {
+    if (!codeData || codeData.expires_at < Date.now()) {
+      return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Authorization code expired or not found' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
       });
     }
+    
+    // Validate client_id matches
+    if (codeData.client_id !== client_id) {
+      return new Response(JSON.stringify({ error: 'invalid_client', error_description: 'Client ID mismatch' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Validate redirect_uri matches
+    if (codeData.redirect_uri !== redirect_uri) {
+      return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Redirect URI mismatch' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Delete code after use (one-time use)
+    authorizationCodes.delete(code);
     
     // Verify PKCE if provided
     if (codeData.code_challenge && code_verifier) {
@@ -768,17 +807,14 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     const refresh_token = `gw_refresh_${generateRandomString(32)}`;
     const expires_in = 3600; // 1 hour
     
-    // Store tokens in session
-    if (!sessionWithCode!.localOAuthTokens) {
-      sessionWithCode!.localOAuthTokens = {};
-    }
-    
-    sessionWithCode!.localOAuthTokens[codeData.domain] = {
-      access_token,
-      refresh_token,
+    // Store access token globally
+    accessTokens.set(access_token, {
+      client_id: codeData.client_id,
+      sessionId: codeData.sessionId,
+      domain: codeData.domain,
       expires_at: Date.now() + (expires_in * 1000),
-      client_id: codeData.client_id
-    };
+      scope: codeData.scope
+    });
     
     const tokenResponse: any = {
       access_token,
