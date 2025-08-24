@@ -310,10 +310,13 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     }
   }
   
-  const response = Response.redirect(`https://${getCurrentDomain(request)}/`, 302);
-  response.headers.set('Set-Cookie', `session=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`);
-  
-  return response;
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Location': `https://${getCurrentDomain(request)}/`,
+      'Set-Cookie': `session=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`
+    }
+  });
 }
 
 // OAuth handlers
