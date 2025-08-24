@@ -1281,6 +1281,9 @@ async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, 
   let clientCredentials = registeredClients.get(hostRoute.serverDomain);
   const redirectUri = `https://${getCurrentDomain(request)}/oauth/callback`;
   
+  console.log(`Checking for registered client for ${hostRoute.serverDomain}:`, clientCredentials ? 'Found existing client' : 'No existing client');
+  console.log('All registered clients:', Array.from(registeredClients.entries()));
+  
   if (!clientCredentials) {
     // Register client if server supports dynamic registration
     if (upstreamOAuth.registration_endpoint) {
@@ -1330,6 +1333,9 @@ async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, 
   const scope = upstreamOAuth.scopes_supported?.[0] || 'openid';
   authUrl.searchParams.set('scope', scope);
   
+  console.log(`Using client_id: ${clientCredentials.client_id} for upstream OAuth to ${hostRoute.serverDomain}`);
+  console.log(`Authorization URL: ${authUrl.toString()}`);
+  
   return Response.redirect(authUrl.toString(), 302);
 }
 
@@ -1347,6 +1353,10 @@ async function registerUpstreamClient(
     token_endpoint_auth_method: 'client_secret_post',
     scope: discovery.scopes_supported?.join(' ') || 'openid'
   };
+  
+  console.log(`Registering client for ${serverDomain} with redirect URI: ${redirectUri}`);
+  console.log('Registration data:', JSON.stringify(registrationData, null, 2));
+  console.log('Registration endpoint:', discovery.registration_endpoint);
   
   const response = await fetch(discovery.registration_endpoint, {
     method: 'POST',
