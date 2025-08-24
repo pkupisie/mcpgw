@@ -10,20 +10,30 @@
 
 export default {
   async fetch(request, env, ctx) {
-    const rid = (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2));
+    const rid = (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).substring(0, 12);
     const start = Date.now();
     const lvl = logLevel(env);
+    
+    // Log worker initialization info on first request (helps verify deployment)
+    if (!globalThis.workerInitLogged) {
+      console.log(`[${new Date().toISOString()}] [INFO ] [INIT] worker:started | domain_root=${env.DOMAIN_ROOT || 'mcp.copernicusone.com'} log_level=${lvl} observability=enabled`);
+      globalThis.workerInitLogged = true;
+    }
     try {
       const url = new URL(request.url);
-      log(rid, 'debug', 'request:start', {
+      log(rid, 'info', 'request:start', {
         method: request.method,
-        url: redactURL(url).toString(),
         path: url.pathname,
         search: url.search,
-        ip: request.headers.get('cf-connecting-ip') || null,
-        cf_ray: request.headers.get('cf-ray') || null,
-        ua: request.headers.get('user-agent') || null,
-        headers: redactHeadersObj(headersToObject(request.headers, 64)),
+        ip: request.headers.get('cf-connecting-ip') || 'unknown',
+        cf_ray: request.headers.get('cf-ray') || 'none',
+      }, lvl);
+      
+      log(rid, 'debug', 'request:headers', {
+        origin: request.headers.get('origin'),
+        accept: request.headers.get('accept'),
+        content_type: request.headers.get('content-type'),
+        ua: request.headers.get('user-agent'),
       }, lvl);
 
       // Health and root info
@@ -41,7 +51,16 @@ export default {
           });
         }
         const resp = landingHTML(url, env);
-        log(rid, 'debug', 'route:landing', {}, lvl);
+        log(rid, 'info', 'route:landing', { path: url.pathname }, lvl);
+        
+        const elapsed = Date.now() - start;
+        log(rid, 'info', 'response:complete', {
+          status: 200,
+          elapsed_ms: elapsed,
+          route: 'landing',
+          content_type: 'text/html',
+        }, lvl);
+        
         return resp;
       }
       if (url.pathname === '/encode') {
@@ -56,19 +75,48 @@ export default {
         const host = b32ToHost(b32, domainRoot);
         const domain_url = `https://${host}/`;
         const resp = json({ original: target, encoded, worker_url: worker, base32: b32, domain_host: host, domain_url });
-        log(rid, 'debug', 'route:encode', { target }, lvl);
+        log(rid, 'info', 'route:encode', { target, encoded: encoded.substring(0, 20) + '...' }, lvl);
+        
+        const elapsed = Date.now() - start;
+        log(rid, 'info', 'response:complete', {
+          status: 200,
+          elapsed_ms: elapsed,
+          route: 'encode',
+          content_type: 'application/json',
+        }, lvl);
+        
         return resp;
       }
-      if (url.pathname === '/healthz') return json({ ok: true });
+      if (url.pathname === '/healthz') {
+        log(rid, 'debug', 'route:healthz', {}, lvl);
+        const resp = json({ ok: true, timestamp: new Date().toISOString(), log_level: lvl });
+        
+        const elapsed = Date.now() - start;
+        log(rid, 'info', 'response:complete', {
+          status: 200,
+          elapsed_ms: elapsed,
+          route: 'healthz',
+          content_type: 'application/json',
+        }, lvl);
+        
+        return resp;
+      }
 
       // CORS preflight: only when Access-Control-Request-Method is present
       if (request.method === 'OPTIONS' && request.headers.get('access-control-request-method')) {
         const resp = corsPreflight(request);
-        log(rid, 'debug', 'cors:preflight', {
-          origin: request.headers.get('origin') || null,
-          acrh: request.headers.get('access-control-request-headers') || null,
-          acrm: request.headers.get('access-control-request-method') || null,
+        log(rid, 'info', 'cors:preflight', {
+          origin: request.headers.get('origin') || 'none',
+          method: request.headers.get('access-control-request-method') || 'GET',
         }, lvl);
+        
+        const elapsed = Date.now() - start;
+        log(rid, 'info', 'response:complete', {
+          status: 204,
+          elapsed_ms: elapsed,
+          route: 'cors-preflight',
+        }, lvl);
+        
         return resp;
       }
 
@@ -76,26 +124,61 @@ export default {
       const hostRoute = parseHostEncodedUpstream(url.hostname, env);
       if (hostRoute) {
         const upstreamURL = selectUpstreamForRequest(hostRoute.upstreamBase, url, request);
-        log(rid, 'debug', 'route:host-encoded', {
+        log(rid, 'info', 'route:host-encoded', {
           host: url.hostname,
           upstream: redactURL(upstreamURL).toString(),
+          path: url.pathname,
         }, lvl);
         // WebSocket tunneling for host-encoded routing
         const upgrade = request.headers.get('upgrade');
         if (upgrade && upgrade.toLowerCase() === 'websocket') {
-          log(rid, 'info', 'ws:connect', { upstream: upstreamURL.toString() }, lvl);
+          log(rid, 'info', 'ws:connect:start', { 
+            upstream: redactURL(upstreamURL).toString(),
+            upgrade: upgrade,
+          }, lvl);
           const resp = await handleWebSocket(request, upstreamURL, env);
-          log(rid, 'info', 'ws:accepted', { upstream: upstreamURL.toString() }, lvl);
+          log(rid, 'info', 'ws:connect:established', { 
+            upstream: redactURL(upstreamURL).toString(),
+          }, lvl);
           return resp;
         }
-        return await proxyFetch(upstreamURL, request, rid, start, lvl);
+        const response = await proxyFetch(upstreamURL, request, rid, start, lvl);
+        
+        // Log final response completion
+        const elapsed = Date.now() - start;
+        log(rid, 'info', 'response:complete', {
+          status: response.status,
+          elapsed_ms: elapsed,
+          route: 'host-encoded',
+          content_type: response.headers.get('content-type') || 'none',
+        }, lvl);
+        
+        return response;
       }
 
       // No host-encoded upstream and not a known local route
-      log(rid, 'warn', 'route:missing-upstream', { host: url.hostname, path: url.pathname }, lvl);
+      log(rid, 'warn', 'route:missing-upstream', { 
+        host: url.hostname, 
+        path: url.pathname,
+        domain_root: env.DOMAIN_ROOT || 'mcp.copernicusone.com',
+      }, lvl);
+      
+      // Log final response
+      const elapsed = Date.now() - start;
+      log(rid, 'info', 'response:complete', {
+        status: 400,
+        elapsed_ms: elapsed,
+        route: 'missing-upstream',
+      }, lvl);
+      
       return json({ error: 'Missing host-encoded upstream', hint: 'Use the landing page to generate a base32 host under your domain root.' }, 400);
     } catch (err) {
-      log(rid, 'error', 'proxy:error', { message: String(err?.message || err) }, 'debug');
+      log(rid, 'error', 'proxy:error', { 
+        message: String(err?.message || err),
+        stack: err?.stack ? err.stack.split('\n')[0] : 'no-stack',
+        url: url.pathname,
+      }, 'debug');
+      console.error(`[ERROR] [${rid}] Full stack trace:`, err);
       return json({ error: 'Proxy error', detail: String(err?.message || err) }, 502);
     }
   }
@@ -135,11 +218,15 @@ function allowProtocol(protocol, env) {
 }
 
 async function handleWebSocket(clientRequest, upstreamURL, env) {
+  const wsRid = (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).substring(0, 8);
+  console.log(`[${new Date().toISOString()}] [INFO ] [${wsRid}] ws:handler:start | upstream=${redactURL(upstreamURL).toString()}`);
+  
   // Accept client socket
   const pair = new WebSocketPair();
   const clientSocket = pair[0];
   const workerSocket = pair[1];
   clientSocket.accept();
+  console.log(`[${new Date().toISOString()}] [DEBUG] [${wsRid}] ws:client:accepted`);
 
   // Connect to upstream as a WebSocket client
   const headers = new Headers();
@@ -150,35 +237,68 @@ async function handleWebSocket(clientRequest, upstreamURL, env) {
 
   let upstreamResp;
   try {
+    console.log(`[${new Date().toISOString()}] [DEBUG] [${wsRid}] ws:upstream:connecting | url=${redactURL(upstreamURL).toString()}`);
     upstreamResp = await fetch(upstreamURL.toString(), { method: 'GET', headers });
   } catch (e) {
+    console.error(`[${new Date().toISOString()}] [ERROR] [${wsRid}] ws:upstream:error | message=${e.message}`);
     clientSocket.close(1011, 'Upstream connect error');
     return new Response(null, { status: 101, webSocket: workerSocket });
   }
   const upstreamSocket = upstreamResp.webSocket;
   if (!upstreamSocket) {
+    console.error(`[${new Date().toISOString()}] [ERROR] [${wsRid}] ws:upstream:no-socket | status=${upstreamResp.status}`);
     clientSocket.close(1011, 'No upstream websocket');
     return new Response(null, { status: 101, webSocket: workerSocket });
   }
   upstreamSocket.accept();
+  console.log(`[${new Date().toISOString()}] [INFO ] [${wsRid}] ws:tunnel:established`);
 
-  // Bidirectional piping
+  // Bidirectional piping with logging
+  let msgCount = { fromUpstream: 0, fromClient: 0 };
+  
   upstreamSocket.addEventListener('message', (evt) => {
-    try { clientSocket.send(evt.data); } catch { try { upstreamSocket.close(1011, 'client send failed'); } catch {} }
+    msgCount.fromUpstream++;
+    try { 
+      clientSocket.send(evt.data);
+      if (msgCount.fromUpstream % 100 === 0) {
+        console.log(`[${new Date().toISOString()}] [DEBUG] [${wsRid}] ws:messages | fromUpstream=${msgCount.fromUpstream} fromClient=${msgCount.fromClient}`);
+      }
+    } catch (e) { 
+      console.error(`[${new Date().toISOString()}] [ERROR] [${wsRid}] ws:client:send-failed | error=${e.message}`);
+      try { upstreamSocket.close(1011, 'client send failed'); } catch {} 
+    }
   });
+  
   clientSocket.addEventListener('message', (evt) => {
-    try { upstreamSocket.send(evt.data); } catch { try { clientSocket.close(1011, 'upstream send failed'); } catch {} }
+    msgCount.fromClient++;
+    try { 
+      upstreamSocket.send(evt.data);
+      if (msgCount.fromClient % 100 === 0) {
+        console.log(`[${new Date().toISOString()}] [DEBUG] [${wsRid}] ws:messages | fromUpstream=${msgCount.fromUpstream} fromClient=${msgCount.fromClient}`);
+      }
+    } catch (e) { 
+      console.error(`[${new Date().toISOString()}] [ERROR] [${wsRid}] ws:upstream:send-failed | error=${e.message}`);
+      try { clientSocket.close(1011, 'upstream send failed'); } catch {} 
+    }
   });
+  
   upstreamSocket.addEventListener('close', (evt) => {
+    console.log(`[${new Date().toISOString()}] [INFO ] [${wsRid}] ws:upstream:closed | code=${evt.code} reason="${evt.reason || 'none'}" totalMessages=${msgCount.fromUpstream + msgCount.fromClient}`);
     try { clientSocket.close(evt.code, evt.reason); } catch {}
   });
+  
   clientSocket.addEventListener('close', (evt) => {
+    console.log(`[${new Date().toISOString()}] [INFO ] [${wsRid}] ws:client:closed | code=${evt.code} reason="${evt.reason || 'none'}" totalMessages=${msgCount.fromUpstream + msgCount.fromClient}`);
     try { upstreamSocket.close(evt.code, evt.reason); } catch {}
   });
-  upstreamSocket.addEventListener('error', () => {
+  
+  upstreamSocket.addEventListener('error', (err) => {
+    console.error(`[${new Date().toISOString()}] [ERROR] [${wsRid}] ws:upstream:error | error=${err.message || 'unknown'}`);
     try { clientSocket.close(1011, 'upstream error'); } catch {}
   });
-  clientSocket.addEventListener('error', () => {
+  
+  clientSocket.addEventListener('error', (err) => {
+    console.error(`[${new Date().toISOString()}] [ERROR] [${wsRid}] ws:client:error | error=${err.message || 'unknown'}`);
     try { upstreamSocket.close(1011, 'client error'); } catch {}
   });
 
@@ -280,9 +400,25 @@ function shouldLog(requested, current) {
 function log(rid, level, event, data, currentLevel = 'debug') {
   if (!shouldLog(level, currentLevel)) return;
   try {
-    console.log(JSON.stringify({ ts: new Date().toISOString(), rid, level, event, ...data }));
+    const ts = new Date().toISOString();
+    const levelStr = level.toUpperCase().padEnd(5);
+    // Format data as key=value pairs
+    let dataStr = '';
+    if (data && typeof data === 'object') {
+      const pairs = [];
+      for (const [key, value] of Object.entries(data)) {
+        if (value !== null && value !== undefined) {
+          const val = typeof value === 'object' ? JSON.stringify(value) : String(value);
+          pairs.push(`${key}=${val}`);
+        }
+      }
+      if (pairs.length > 0) {
+        dataStr = ' | ' + pairs.join(' ');
+      }
+    }
+    console.log(`[${ts}] [${levelStr}] [${rid}] ${event}${dataStr}`);
   } catch (e) {
-    console.log(`[log ${level}] ${event} rid=${rid}`);
+    console.log(`[LOG ERROR] Failed to log: ${event} rid=${rid}`);
   }
 }
 function headersToObject(headers, max = 64) {
@@ -363,23 +499,55 @@ function selectUpstreamForRequest(upstreamBase, reqUrl, request) {
 
 async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
   const init = initOpt || (await buildUpstreamInit(request));
-  log(rid, 'debug', 'upstream:request', {
+  
+  log(rid, 'info', 'upstream:request', {
     method: init.method,
-    url: upstreamURL.toString(),
-    headers: redactHeadersObj(headersToObject(init.headers, 64)),
-    body_len: request.headers.get('content-length') || null,
+    url: redactURL(upstreamURL).toString(),
+    body_len: request.headers.get('content-length') || '0',
   }, lvl);
-  const upstreamResp = await fetch(upstreamURL.toString(), init);
+  
+  log(rid, 'debug', 'upstream:headers', {
+    accept: init.headers.get('accept'),
+    content_type: init.headers.get('content-type'),
+    authorization: init.headers.get('authorization') ? 'present' : 'none',
+  }, lvl);
+  
+  let upstreamResp;
+  try {
+    upstreamResp = await fetch(upstreamURL.toString(), init);
+  } catch (err) {
+    const elapsed = Date.now() - start;
+    log(rid, 'error', 'upstream:fetch-failed', {
+      error: err.message,
+      elapsed_ms: elapsed,
+      url: redactURL(upstreamURL).toString(),
+    }, lvl);
+    throw err;
+  }
+  
   const contentType = upstreamResp.headers.get('content-type') || '';
+  const contentLength = upstreamResp.headers.get('content-length') || 'stream';
   const isSSE = contentType.includes('text/event-stream');
   const respHeaders = filterResponseHeaders(upstreamResp.headers);
-  log(rid, 'debug', 'upstream:response', {
+  const elapsed = Date.now() - start;
+  
+  log(rid, 'info', 'upstream:response', {
     status: upstreamResp.status,
-    content_type: contentType || null,
-    sse: isSSE,
-    headers: headersToObject(respHeaders, 64),
-    elapsed_ms: Date.now() - start,
+    status_text: upstreamResp.statusText || 'OK',
+    content_type: contentType || 'none',
+    content_length: contentLength,
+    sse: isSSE ? 'yes' : 'no',
+    elapsed_ms: elapsed,
   }, lvl);
+  
+  if (upstreamResp.status >= 400) {
+    log(rid, 'warn', 'upstream:error-status', {
+      status: upstreamResp.status,
+      url: redactURL(upstreamURL).toString(),
+      elapsed_ms: elapsed,
+    }, lvl);
+  }
+  
   return new Response(upstreamResp.body, {
     status: upstreamResp.status,
     statusText: upstreamResp.statusText,
