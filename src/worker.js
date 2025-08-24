@@ -24,7 +24,8 @@ export default {
       // Prepare headers for logging
       const incomingHeaders = {};
       for (const [k, v] of request.headers.entries()) {
-        incomingHeaders[k] = k.toLowerCase() === 'authorization' || k.toLowerCase() === 'cookie' ? 'REDACTED' : v;
+        // Show authorization for debugging (security risk - remove in production)
+        incomingHeaders[k] = k.toLowerCase() === 'cookie' ? 'REDACTED' : v;
       }
       
       log(rid, 'info', 'request:start', {
@@ -652,7 +653,8 @@ async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
   // Prepare headers for logging
   const reqHeadersObj = {};
   for (const [k, v] of init.headers.entries()) {
-    reqHeadersObj[k] = k.toLowerCase() === 'authorization' ? 'REDACTED' : v;
+    // Show authorization for debugging (security risk - remove in production)
+    reqHeadersObj[k] = v;
   }
   
   log(rid, 'info', 'upstream:request', {
