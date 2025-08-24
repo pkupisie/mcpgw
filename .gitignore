@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+*.log
+dist/
+.DS_Store
+.env
+coverage/
+*.local
+tmp/
