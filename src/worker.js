@@ -65,31 +65,21 @@ export default {
         return resp;
       }
 
-      // Default upstream mode: ignore encoded path; route based on DEFAULT_UPSTREAM
-      const defaultUpstream = env.DEFAULT_UPSTREAM || 'https://mcp.atlassian.com/v1/sse';
+      // Default upstream mode: ignore encoded path; route based on DEFAULT_UPSTREAM (origin)
+      const defaultUpstream = env.DEFAULT_UPSTREAM || 'https://mcp.atlassian.com/';
       let defaultURL;
       try { defaultURL = new URL(defaultUpstream); }
       catch { return badRequest('DEFAULT_UPSTREAM invalid'); }
       if (!allowProtocol(defaultURL.protocol, env)) return badRequest('Upstream protocol not allowed');
-
-      const wantsSSE = request.method.toUpperCase() === 'GET' && (
-        (request.headers.get('accept') || '').includes('text/event-stream') ||
-        url.pathname === '/v1/sse' || url.pathname.endsWith('/sse')
-      );
-
-      let upstreamURL = new URL(defaultURL.href);
-      if (!wantsSSE) {
-        // Route other traffic to same origin with original path
-        upstreamURL = new URL(defaultURL.origin);
-        upstreamURL.pathname = url.pathname;
-      }
+      // Route all traffic to same origin with original path
+      let upstreamURL = new URL(defaultURL.origin);
+      upstreamURL.pathname = url.pathname;
       if (url.search) {
         const incoming = new URLSearchParams(url.search);
         for (const [k, v] of incoming.entries()) upstreamURL.searchParams.set(k, v);
       }
       log(rid, 'debug', 'route:default', {
-        upstream: redactURL(upstreamURL).toString(),
-        wantsSSE,
+        upstream: redactURL(upstreamURL).toString()
       }, lvl);
 
       // WebSocket tunneling

@@ -6,6 +6,6 @@
   "vars": {
     "ALLOW_PROTOCOLS": "https:,wss:",
     "LOG_LEVEL": "debug",
-    "DEFAULT_UPSTREAM": "https://mcp.atlassian.com/v1/sse"
+    "DEFAULT_UPSTREAM": "https://mcp.atlassian.com/"
   }
 }
