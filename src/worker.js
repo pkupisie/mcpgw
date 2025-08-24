@@ -36,8 +36,11 @@ export default {
         ua: request.headers.get('user-agent'),
       }, lvl);
 
-      // Health and root info
-      if (url.pathname === '/' || url.pathname === '' || url.pathname === '/index.html') {
+      // Check if this is the landing page subdomain
+      const isLandingDomain = url.hostname.toLowerCase() === 'mcp.copernicusone.com';
+      
+      // Health and root info - only show on landing domain
+      if (isLandingDomain && (url.pathname === '/' || url.pathname === '' || url.pathname === '/index.html')) {
         // Simple content-negotiation: if client prefers JSON, return JSON; else HTML landing
         const accept = request.headers.get('accept') || '';
         if (/application\/json/i.test(accept)) {
@@ -46,8 +49,8 @@ export default {
             message: 'MCP MITM proxy is up',
             usage: 'GET/POST/WS: /<base64url-encoded-full-upstream-url>',
             example: '/aHR0cHM6Ly9tY3AuYXRsYXNzaWFuLmNvbS92MS9zc2U',
-            domain_root: env.DOMAIN_ROOT || 'mcp.copernicusone.com',
-            domain_usage: 'https://b32-<base32(url)>.{domain_root}/',
+            domain_root: env.DOMAIN_ROOT || 'copernicusone.com',
+            domain_usage: 'https://<base64(domain)>.{domain_root}/',
           });
         }
         const resp = landingHTML(url, env);
@@ -63,7 +66,7 @@ export default {
         
         return resp;
       }
-      if (url.pathname === '/encode') {
+      if (isLandingDomain && url.pathname === '/encode') {
         const target = url.searchParams.get('url') || '';
         if (!target) return badRequest('Missing url param');
         
@@ -112,7 +115,7 @@ export default {
         
         return resp;
       }
-      if (url.pathname === '/healthz') {
+      if (isLandingDomain && url.pathname === '/healthz') {
         log(rid, 'debug', 'route:healthz', {}, lvl);
         const resp = json({ ok: true, timestamp: new Date().toISOString(), log_level: lvl });
         
