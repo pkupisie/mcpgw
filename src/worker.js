@@ -256,7 +256,7 @@ export default {
       log(rid, 'error', 'proxy:error', { 
         message: String(err?.message || err),
         stack: err?.stack ? err.stack.split('\n')[0] : 'no-stack',
-        url: url.pathname,
+        url: request.url,
       }, 'debug');
       console.error(`[ERROR] [${rid}] Full stack trace:`, err);
       return json({ error: 'Proxy error', detail: String(err?.message || err) }, 502);
