@@ -367,7 +367,13 @@ function landingHTML(url) {
       return new TextDecoder().decode(bytes);
     }
     function qs(sel){ return document.querySelector(sel); }
-    function copy(text){ navigator.clipboard?.writeText(text); }
+    function copy(text){
+      try { if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text); } catch {}
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+      } catch {}
+    }
     function update(){
       const input = qs('#target');
       const raw = input.value.trim();
@@ -410,11 +416,14 @@ function landingHTML(url) {
     <div class="wrap">
       <h1>MCP MITM Proxy</h1>
       <div class="muted">Origin: <code>${origin}</code></div>
-      <div class="row">
+      <form class="row" method="GET" action="/">
         <label for="target">Enter the full upstream MCP URL</label>
-        <input id="target" type="url" placeholder="e.g. ${example}" value="${escapeHtml(targetParam)}" spellcheck="false" />
+        <div class="grid">
+          <input id="target" name="url" type="url" placeholder="e.g. ${example}" value="${escapeHtml(targetParam)}" spellcheck="false" required />
+          <button class="btn" type="submit">Generate</button>
+        </div>
         <div class="small muted">Only TLS upstreams are allowed by default (https:, wss:).</div>
-      </div>
+      </form>
       <div id="out" class="row">${preRendered}</div>
       <div class="row small muted">API: <code>GET ${origin}/encode?url=&lt;full-url&gt;</code> returns JSON.</div>
     </div>
