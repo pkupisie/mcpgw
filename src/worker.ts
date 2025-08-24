@@ -27,12 +27,22 @@ interface SessionData {
   localAuth: boolean;
   oauth?: {
     [serverDomain: string]: {
+      state?: string;
+      pkceVerifier?: string;
       tokens?: {
         access_token: string;
         refresh_token?: string;
         expires_in?: number;
       };
       expiresAt?: number;
+    };
+  };
+  localOAuthTokens?: {
+    [domain: string]: {
+      access_token: string;
+      refresh_token?: string;
+      expires_at: number;
+      client_id: string;
     };
   };
 }
@@ -62,6 +72,15 @@ export default {
       const hostRoute = parseHostEncodedUpstream(url.hostname, env.DOMAIN_ROOT);
       
       if (hostRoute) {
+        // Check if this is a local OAuth request
+        if (url.pathname.startsWith('/.well-known/oauth-authorization-server')) {
+          return handleOAuthDiscovery(request, hostRoute, env);
+        }
+        
+        if (url.pathname.startsWith('/oauth/')) {
+          return handleLocalOAuth(request, hostRoute, env);
+        }
+        
         // This is an MCP server request
         return handleMCPRequest(request, hostRoute, env);
       }
@@ -149,34 +168,68 @@ function parseHostEncodedUpstream(hostname: string, domainRoot: string): MCPRout
 
 // MCP request handler
 async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
-  // Get session
-  const sessionId = getSessionId(request);
-  if (!sessionId) {
+  const hostname = new URL(request.url).hostname;
+  
+  // First validate local OAuth token
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return new Response(JSON.stringify({ 
       error: 'Authentication required',
-      loginUrl: `https://${getCurrentDomain(request)}/login`
+      error_description: 'Bearer token required'
     }), { 
       status: 401,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': 'Bearer'
+      }
     });
   }
   
-  const session = await getSession(sessionId, env);
-  if (!session || !session.localAuth) {
+  const localToken = authHeader.slice(7); // Remove 'Bearer '
+  
+  // Find session with this local token
+  let sessionWithToken: SessionData | null = null;
+  for (const session of sessions.values()) {
+    const tokenData = session.localOAuthTokens?.[hostname];
+    if (tokenData?.access_token === localToken) {
+      if (tokenData.expires_at > Date.now()) {
+        sessionWithToken = session;
+        break;
+      } else {
+        // Token expired
+        return new Response(JSON.stringify({ 
+          error: 'invalid_token',
+          error_description: 'Token expired'
+        }), { 
+          status: 401,
+          headers: { 
+            'Content-Type': 'application/json',
+            'WWW-Authenticate': 'Bearer error="invalid_token"'
+          }
+        });
+      }
+    }
+  }
+  
+  if (!sessionWithToken || !sessionWithToken.localAuth) {
     return new Response(JSON.stringify({ 
-      error: 'Authentication required',
-      loginUrl: `https://${getCurrentDomain(request)}/login`
+      error: 'invalid_token',
+      error_description: 'Invalid or expired token'
     }), { 
       status: 401,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': 'Bearer error="invalid_token"'
+      }
     });
   }
   
-  // Check OAuth tokens for this server
-  const serverData = session.oauth?.[hostRoute.serverDomain];
+  // Check upstream OAuth tokens for this server
+  const serverData = sessionWithToken.oauth?.[hostRoute.serverDomain];
   if (!serverData?.tokens) {
     return new Response(JSON.stringify({ 
-      error: 'OAuth required for server',
+      error: 'upstream_auth_required',
+      error_description: 'Upstream server authentication required',
       server: hostRoute.serverDomain,
       authUrl: `https://${getCurrentDomain(request)}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`
     }), { 
@@ -190,11 +243,19 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   
   const upstreamHeaders: Record<string, string> = {};
   request.headers.forEach((value, key) => {
-    upstreamHeaders[key] = value;
+    if (key.toLowerCase() !== 'host' && key.toLowerCase() !== 'authorization') {
+      upstreamHeaders[key] = value;
+    }
   });
   upstreamHeaders['Authorization'] = `Bearer ${serverData.tokens.access_token}`;
   upstreamHeaders['Host'] = hostRoute.upstreamBase.hostname;
 
+  // Check for WebSocket upgrade
+  const upgradeHeader = request.headers.get('Upgrade');
+  if (upgradeHeader === 'websocket') {
+    return handleWebSocketUpgrade(request, hostRoute, upstreamHeaders);
+  }
+  
   const upstreamRequest = new Request(upstreamUrl.toString(), {
     method: request.method,
     headers: upstreamHeaders,
@@ -206,8 +267,17 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   
   // Handle token refresh on 401
   if (response.status === 401 && serverData.tokens.refresh_token) {
-    // TODO: Implement token refresh
-    console.log('Token refresh needed for', hostRoute.serverDomain);
+    const refreshed = await refreshUpstreamToken(hostRoute.serverDomain, serverData, env);
+    if (refreshed) {
+      // Retry with new token
+      upstreamHeaders['Authorization'] = `Bearer ${serverData.tokens.access_token}`;
+      const retryRequest = new Request(upstreamUrl.toString(), {
+        method: request.method,
+        headers: upstreamHeaders,
+        body: request.body,
+      });
+      return await fetch(retryRequest);
+    }
   }
   
   return response;
@@ -310,16 +380,307 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     }
   }
   
+  // Check for return_to parameter
+  const returnTo = new URL(request.url).searchParams.get('return_to') || 
+                   formData.get('return_to') as string || 
+                   `https://${getCurrentDomain(request)}/`;
+  
   return new Response(null, {
     status: 302,
     headers: {
-      'Location': `https://${getCurrentDomain(request)}/`,
+      'Location': returnTo,
       'Set-Cookie': `session=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`
     }
   });
 }
 
-// OAuth handlers
+// Local OAuth handlers for encoded domains
+async function handleOAuthDiscovery(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const hostname = new URL(request.url).hostname;
+  
+  const discovery = {
+    issuer: `https://${hostname}`,
+    authorization_endpoint: `https://${hostname}/oauth/authorize`,
+    token_endpoint: `https://${hostname}/oauth/token`,
+    revocation_endpoint: `https://${hostname}/oauth/revoke`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    code_challenge_methods_supported: ['S256'],
+    token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
+    scopes_supported: ['openid', 'profile', 'email']
+  };
+  
+  return new Response(JSON.stringify(discovery, null, 2), {
+    headers: { 
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'max-age=3600'
+    }
+  });
+}
+
+async function handleLocalOAuth(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  
+  if (url.pathname === '/oauth/authorize') {
+    if (request.method === 'GET') return handleLocalOAuthAuthorize(request, hostRoute, env);
+    if (request.method === 'POST') return handleLocalOAuthAuthorizePost(request, hostRoute, env);
+  }
+  
+  if (url.pathname === '/oauth/token') {
+    if (request.method === 'POST') return handleLocalOAuthToken(request, hostRoute, env);
+  }
+  
+  if (url.pathname === '/oauth/revoke') {
+    if (request.method === 'POST') return handleLocalOAuthRevoke(request, hostRoute, env);
+  }
+  
+  return new Response('OAuth endpoint not found', { status: 404 });
+}
+
+async function handleLocalOAuthAuthorize(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const params = url.searchParams;
+  
+  const response_type = params.get('response_type');
+  const client_id = params.get('client_id');
+  const redirect_uri = params.get('redirect_uri');
+  const scope = params.get('scope');
+  const state = params.get('state');
+  const code_challenge = params.get('code_challenge');
+  const code_challenge_method = params.get('code_challenge_method');
+  
+  // Validate required parameters
+  if (response_type !== 'code') {
+    return new Response('Only authorization code flow is supported', { status: 400 });
+  }
+  
+  if (!client_id || !redirect_uri) {
+    return new Response('Missing required parameters: client_id, redirect_uri', { status: 400 });
+  }
+  
+  // Check if user is authenticated with gateway
+  const sessionId = getSessionId(request);
+  const session = sessionId ? await getSession(sessionId, env) : null;
+  
+  if (!session || !session.localAuth) {
+    // Redirect to login with return URL
+    const loginUrl = new URL(`https://${getCurrentDomain(request)}/login`);
+    loginUrl.searchParams.set('return_to', request.url);
+    return Response.redirect(loginUrl.toString(), 302);
+  }
+  
+  // Show authorization consent page
+  const hostname = new URL(request.url).hostname;
+  const html = `<!doctype html><html><head><title>Authorize Application</title></head><body>
+    <h1>Authorize MCP Access</h1>
+    <p><strong>Application:</strong> ${client_id}</p>
+    <p><strong>Server:</strong> ${hostRoute.serverDomain}</p>
+    <p><strong>Scopes:</strong> ${scope || 'default'}</p>
+    <form method="POST" action="/oauth/authorize">
+      <input type="hidden" name="response_type" value="${response_type}">
+      <input type="hidden" name="client_id" value="${client_id}">
+      <input type="hidden" name="redirect_uri" value="${redirect_uri}">
+      <input type="hidden" name="scope" value="${scope || ''}">
+      <input type="hidden" name="state" value="${state || ''}">
+      <input type="hidden" name="code_challenge" value="${code_challenge || ''}">
+      <input type="hidden" name="code_challenge_method" value="${code_challenge_method || ''}">
+      <button type="submit" name="action" value="authorize">Authorize</button>
+      <button type="submit" name="action" value="deny">Deny</button>
+    </form>
+  </body></html>`;
+  
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const formData = await request.formData();
+  const action = formData.get('action');
+  
+  if (action !== 'authorize') {
+    const redirect_uri = formData.get('redirect_uri') as string;
+    const state = formData.get('state') as string;
+    const errorUrl = new URL(redirect_uri);
+    errorUrl.searchParams.set('error', 'access_denied');
+    if (state) errorUrl.searchParams.set('state', state);
+    return Response.redirect(errorUrl.toString(), 302);
+  }
+  
+  // Generate authorization code
+  const code = generateRandomString(32);
+  const sessionId = getSessionId(request);
+  const session = await getSession(sessionId!, env);
+  
+  if (!session) {
+    return new Response('Session expired', { status: 401 });
+  }
+  
+  // Store authorization code data
+  const hostname = new URL(request.url).hostname;
+  if (!session.localOAuthTokens) {
+    session.localOAuthTokens = {};
+  }
+  
+  // Store code temporarily (in practice, use a separate code store)
+  const codeData = {
+    client_id: formData.get('client_id') as string,
+    redirect_uri: formData.get('redirect_uri') as string,
+    scope: formData.get('scope') as string,
+    code_challenge: formData.get('code_challenge') as string,
+    code_challenge_method: formData.get('code_challenge_method') as string,
+    domain: hostname,
+    expires_at: Date.now() + 600000 // 10 minutes
+  };
+  
+  // Store in session temporarily (TODO: use proper storage)
+  (session as any)[`code_${code}`] = codeData;
+  
+  // Redirect back to client
+  const redirectUrl = new URL(formData.get('redirect_uri') as string);
+  redirectUrl.searchParams.set('code', code);
+  const state = formData.get('state') as string;
+  if (state) redirectUrl.searchParams.set('state', state);
+  
+  return Response.redirect(redirectUrl.toString(), 302);
+}
+
+async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const formData = await request.formData();
+  const grant_type = formData.get('grant_type');
+  
+  if (grant_type === 'authorization_code') {
+    const code = formData.get('code') as string;
+    const client_id = formData.get('client_id') as string;
+    const redirect_uri = formData.get('redirect_uri') as string;
+    const code_verifier = formData.get('code_verifier') as string;
+    
+    // Find session with this code (simplified - in practice use proper storage)
+    let codeData: any = null;
+    let sessionWithCode: SessionData | null = null;
+    
+    for (const [sessionId, session] of sessions.entries()) {
+      const stored = (session as any)[`code_${code}`];
+      if (stored && stored.expires_at > Date.now()) {
+        codeData = stored;
+        sessionWithCode = session;
+        delete (session as any)[`code_${code}`]; // One-time use
+        break;
+      }
+    }
+    
+    if (!codeData) {
+      return new Response(JSON.stringify({ error: 'invalid_grant' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Verify PKCE if provided
+    if (codeData.code_challenge && code_verifier) {
+      const challenge = await sha256Base64Url(code_verifier);
+      if (challenge !== codeData.code_challenge) {
+        return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'PKCE verification failed' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+    
+    // Generate tokens
+    const access_token = `gw_access_${generateRandomString(32)}`;
+    const refresh_token = `gw_refresh_${generateRandomString(32)}`;
+    const expires_in = 3600; // 1 hour
+    
+    // Store tokens in session
+    if (!sessionWithCode!.localOAuthTokens) {
+      sessionWithCode!.localOAuthTokens = {};
+    }
+    
+    sessionWithCode!.localOAuthTokens[codeData.domain] = {
+      access_token,
+      refresh_token,
+      expires_at: Date.now() + (expires_in * 1000),
+      client_id: codeData.client_id
+    };
+    
+    return new Response(JSON.stringify({
+      access_token,
+      refresh_token,
+      token_type: 'Bearer',
+      expires_in,
+      scope: codeData.scope
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  if (grant_type === 'refresh_token') {
+    const refresh_token = formData.get('refresh_token') as string;
+    const hostname = new URL(request.url).hostname;
+    
+    // Find session with this refresh token
+    let tokenData: any = null;
+    let sessionWithToken: SessionData | null = null;
+    
+    for (const session of sessions.values()) {
+      const localToken = session.localOAuthTokens?.[hostname];
+      if (localToken?.refresh_token === refresh_token) {
+        tokenData = localToken;
+        sessionWithToken = session;
+        break;
+      }
+    }
+    
+    if (!tokenData) {
+      return new Response(JSON.stringify({ error: 'invalid_grant' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Generate new access token
+    const access_token = `gw_access_${generateRandomString(32)}`;
+    const expires_in = 3600;
+    
+    tokenData.access_token = access_token;
+    tokenData.expires_at = Date.now() + (expires_in * 1000);
+    
+    return new Response(JSON.stringify({
+      access_token,
+      refresh_token,
+      token_type: 'Bearer',
+      expires_in
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  return new Response(JSON.stringify({ error: 'unsupported_grant_type' }), {
+    status: 400,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+async function handleLocalOAuthRevoke(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const formData = await request.formData();
+  const token = formData.get('token') as string;
+  const hostname = new URL(request.url).hostname;
+  
+  // Find and revoke token
+  for (const session of sessions.values()) {
+    const localToken = session.localOAuthTokens?.[hostname];
+    if (localToken && (localToken.access_token === token || localToken.refresh_token === token)) {
+      delete session.localOAuthTokens[hostname];
+      break;
+    }
+  }
+  
+  return new Response('', { status: 200 });
+}
+
+// Upstream OAuth handlers
 async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const serverDomain = url.searchParams.get('server');
@@ -341,10 +702,32 @@ async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
     return new Response('Unknown server', { status: 400 });
   }
   
+  // Get or create session
+  const sessionId = getSessionId(request);
+  if (!sessionId) {
+    return new Response('Session required', { status: 401 });
+  }
+  
+  const session = await getSession(sessionId, env);
+  if (!session || !session.localAuth) {
+    return new Response('Authentication required', { status: 401 });
+  }
+  
   // Generate OAuth URL
   const state = generateRandomString(16);
   const verifier = generateRandomString(32);
   const challenge = await sha256Base64Url(verifier);
+  
+  // Store PKCE verifier and state in session
+  if (!session.oauth) {
+    session.oauth = {};
+  }
+  if (!session.oauth[serverDomain]) {
+    session.oauth[serverDomain] = {};
+  }
+  
+  session.oauth[serverDomain].state = state;
+  session.oauth[serverDomain].pkceVerifier = verifier;
   
   const authUrl = new URL(serverConfig.authzEndpoint);
   authUrl.searchParams.set('response_type', 'code');
@@ -355,15 +738,243 @@ async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
   authUrl.searchParams.set('code_challenge', challenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
   
-  // Store PKCE verifier (simplified - in production use KV or encrypt in state)
-  // TODO: Store verifier securely
-  
   return Response.redirect(authUrl.toString(), 302);
 }
 
 async function handleOAuthCallback(request: Request, env: Env): Promise<Response> {
-  // TODO: Implement OAuth callback
-  return new Response('OAuth callback - TODO: Implement token exchange', { status: 501 });
+  const url = new URL(request.url);
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const error = url.searchParams.get('error');
+  
+  if (error) {
+    return new Response(`OAuth error: ${error}`, { status: 400 });
+  }
+  
+  if (!code || !state) {
+    return new Response('Missing required callback parameters', { status: 400 });
+  }
+  
+  // Parse state to get server domain
+  const [serverDomain, expectedState] = state.split(':', 2);
+  if (!serverDomain || !expectedState) {
+    return new Response('Invalid state parameter', { status: 400 });
+  }
+  
+  // Get session
+  const sessionId = getSessionId(request);
+  if (!sessionId) {
+    return new Response('Session required', { status: 401 });
+  }
+  
+  const session = await getSession(sessionId, env);
+  if (!session || !session.localAuth) {
+    return new Response('Authentication required', { status: 401 });
+  }
+  
+  // Verify state and get PKCE verifier
+  const oauthData = session.oauth?.[serverDomain];
+  if (!oauthData || oauthData.state !== expectedState) {
+    return new Response('Invalid state - possible CSRF attack', { status: 400 });
+  }
+  
+  if (!oauthData.pkceVerifier) {
+    return new Response('PKCE verifier not found', { status: 400 });
+  }
+  
+  // Get server config
+  let mcpServers: MCPServerConfig[] = [];
+  try {
+    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
+  } catch (e) {
+    return new Response('Server configuration error', { status: 500 });
+  }
+  
+  const serverConfig = mcpServers.find(s => s.domain === serverDomain);
+  if (!serverConfig) {
+    return new Response('Unknown server', { status: 400 });
+  }
+  
+  // Exchange code for tokens
+  const tokenRequestBody = new URLSearchParams();
+  tokenRequestBody.append('grant_type', 'authorization_code');
+  tokenRequestBody.append('code', code);
+  tokenRequestBody.append('redirect_uri', `https://${getCurrentDomain(request)}/oauth/callback`);
+  tokenRequestBody.append('client_id', serverConfig.clientId);
+  tokenRequestBody.append('code_verifier', oauthData.pkceVerifier);
+  
+  if (serverConfig.clientSecret) {
+    tokenRequestBody.append('client_secret', serverConfig.clientSecret);
+  }
+  
+  try {
+    const tokenResponse = await fetch(serverConfig.tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json'
+      },
+      body: tokenRequestBody.toString()
+    });
+    
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      console.error('Token exchange failed:', errorText);
+      return new Response(`Token exchange failed: ${tokenResponse.status}`, { status: 400 });
+    }
+    
+    const tokenData = await tokenResponse.json() as any;
+    
+    // Store tokens
+    oauthData.tokens = {
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expires_in: tokenData.expires_in || 3600
+    };
+    oauthData.expiresAt = Date.now() + (tokenData.expires_in || 3600) * 1000;
+    
+    // Clear PKCE data
+    delete oauthData.state;
+    delete oauthData.pkceVerifier;
+    
+    // Redirect to dashboard
+    return Response.redirect(`https://${getCurrentDomain(request)}/`, 302);
+    
+  } catch (error) {
+    console.error('Token exchange error:', error);
+    return new Response('Token exchange failed', { status: 500 });
+  }
+}
+
+async function refreshUpstreamToken(serverDomain: string, serverData: any, env: Env): Promise<boolean> {
+  if (!serverData.tokens?.refresh_token) {
+    return false;
+  }
+  
+  // Get server config
+  let mcpServers: MCPServerConfig[] = [];
+  try {
+    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
+  } catch (e) {
+    console.error('Failed to parse MCP_SERVERS:', e);
+    return false;
+  }
+  
+  const serverConfig = mcpServers.find(s => s.domain === serverDomain);
+  if (!serverConfig) {
+    console.error('Server config not found for:', serverDomain);
+    return false;
+  }
+  
+  const refreshRequestBody = new URLSearchParams();
+  refreshRequestBody.append('grant_type', 'refresh_token');
+  refreshRequestBody.append('refresh_token', serverData.tokens.refresh_token);
+  refreshRequestBody.append('client_id', serverConfig.clientId);
+  
+  if (serverConfig.clientSecret) {
+    refreshRequestBody.append('client_secret', serverConfig.clientSecret);
+  }
+  
+  try {
+    const refreshResponse = await fetch(serverConfig.tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json'
+      },
+      body: refreshRequestBody.toString()
+    });
+    
+    if (!refreshResponse.ok) {
+      const errorText = await refreshResponse.text();
+      console.error('Token refresh failed:', errorText);
+      return false;
+    }
+    
+    const tokenData = await refreshResponse.json() as any;
+    
+    // Update tokens
+    serverData.tokens.access_token = tokenData.access_token;
+    if (tokenData.refresh_token) {
+      serverData.tokens.refresh_token = tokenData.refresh_token;
+    }
+    serverData.tokens.expires_in = tokenData.expires_in || 3600;
+    serverData.expiresAt = Date.now() + (tokenData.expires_in || 3600) * 1000;
+    
+    console.log('Token refreshed successfully for:', serverDomain);
+    return true;
+    
+  } catch (error) {
+    console.error('Token refresh error:', error);
+    return false;
+  }
+}
+
+async function handleWebSocketUpgrade(request: Request, hostRoute: MCPRouteInfo, upstreamHeaders: Record<string, string>): Promise<Response> {
+  // Create upstream WebSocket URL
+  const upstreamUrl = new URL(request.url.replace(request.url.split('/')[2], hostRoute.upstreamBase.host));
+  upstreamUrl.protocol = upstreamUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  
+  // Add authorization as query parameter since Cloudflare Workers WebSocket doesn't support custom headers
+  const bearerToken = upstreamHeaders['Authorization']?.replace('Bearer ', '');
+  if (bearerToken) {
+    upstreamUrl.searchParams.set('access_token', bearerToken);
+  }
+  
+  // Create WebSocket pair
+  const webSocketPair = new WebSocketPair();
+  const [client, server] = Object.values(webSocketPair);
+  
+  // Accept the client connection
+  server.accept();
+  
+  // Connect to upstream WebSocket
+  try {
+    const upstreamWs = new WebSocket(upstreamUrl.toString());
+    
+    // Forward messages from client to upstream
+    server.addEventListener('message', event => {
+      if (upstreamWs.readyState === WebSocket.OPEN) {
+        upstreamWs.send(event.data);
+      }
+    });
+    
+    // Forward messages from upstream to client
+    upstreamWs.addEventListener('message', event => {
+      if (server.readyState === WebSocket.OPEN) {
+        server.send(event.data);
+      }
+    });
+    
+    // Handle connection events
+    server.addEventListener('close', () => {
+      upstreamWs.close();
+    });
+    
+    upstreamWs.addEventListener('close', () => {
+      server.close();
+    });
+    
+    server.addEventListener('error', (event) => {
+      console.error('Client WebSocket error:', event);
+      upstreamWs.close();
+    });
+    
+    upstreamWs.addEventListener('error', (event) => {
+      console.error('Upstream WebSocket error:', event);
+      server.close();
+    });
+    
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
+    
+  } catch (error) {
+    console.error('WebSocket connection failed:', error);
+    server.close();
+    return new Response('WebSocket connection failed', { status: 500 });
+  }
 }
 
 // Encode handler
