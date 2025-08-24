@@ -404,7 +404,12 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   });
   
   // Forward request
+  console.log(`Forwarding MCP request to ${upstreamUrl.toString()}`);
+  console.log(`Auth header: ${upstreamHeaders['Authorization'] ? 'Bearer token present' : 'No auth'}`);
+  console.log(`Request method: ${request.method}`);
+  
   const response = await fetch(upstreamRequest);
+  console.log(`Upstream response status: ${response.status}`);
   
   // Handle token refresh on 401
   if (response.status === 401 && serverData.tokens.refresh_token) {
