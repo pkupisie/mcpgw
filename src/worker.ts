@@ -813,16 +813,22 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
   const formData = await request.formData();
   const grant_type = formData.get('grant_type');
   
+  console.log(`OAuth token request - grant_type: ${grant_type}`);
+  
   if (grant_type === 'authorization_code') {
     const code = formData.get('code') as string;
     const client_id = formData.get('client_id') as string;
     const redirect_uri = formData.get('redirect_uri') as string;
     const code_verifier = formData.get('code_verifier') as string;
     
+    console.log(`Token request params - code: ${code?.substring(0, 8)}..., client_id: ${client_id}, redirect_uri: ${redirect_uri}`);
+    
     // Look up code in global store
     const codeData = authorizationCodes.get(code);
     
     if (!codeData || codeData.expires_at < Date.now()) {
+      console.log(`Code lookup failed - codeData exists: ${!!codeData}, expired: ${codeData ? codeData.expires_at < Date.now() : 'N/A'}`);
+      console.log(`Available codes: ${Array.from(authorizationCodes.keys()).map(k => k.substring(0, 8) + '...').join(', ')}`);
       return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Authorization code expired or not found' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
