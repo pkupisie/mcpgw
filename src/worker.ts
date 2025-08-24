@@ -77,6 +77,13 @@ interface MCPRouteInfo {
 // In-memory session storage (resets on worker restart)
 const sessions = new Map<string, SessionData>();
 
+// Global registered clients store (resets on worker restart)
+const registeredClients = new Map<string, {
+  client_id: string;
+  client_secret?: string;
+  registered_at: number;
+}>();
+
 // Global authorization code store
 const authorizationCodes = new Map<string, {
   client_id: string;
@@ -1270,12 +1277,36 @@ async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, 
     return new Response('Upstream server does not support OAuth', { status: 400 });
   }
   
+  // Check if we have a registered client for this server
+  let clientCredentials = registeredClients.get(hostRoute.serverDomain);
+  const redirectUri = `https://${getCurrentDomain(request)}/oauth/callback`;
+  
+  if (!clientCredentials) {
+    // Register client if server supports dynamic registration
+    if (upstreamOAuth.registration_endpoint) {
+      try {
+        clientCredentials = await registerUpstreamClient(hostRoute.serverDomain, redirectUri, upstreamOAuth);
+      } catch (error) {
+        console.error('Failed to register client:', error);
+        return new Response('Client registration failed: ' + (error as Error).message, { status: 400 });
+      }
+    } else {
+      // Fall back to default client ID if no registration endpoint
+      clientCredentials = { 
+        client_id: 'mcp-gateway',
+        registered_at: Date.now()
+      };
+      // Store the fallback client for consistency
+      registeredClients.set(hostRoute.serverDomain, clientCredentials);
+    }
+  }
+  
   // Generate PKCE parameters for gateway → upstream flow
   const state = generateRandomString(32);
   const verifier = generateRandomString(32);
   const challenge = await sha256Base64Url(verifier);
   
-  // Store upstream OAuth state in session
+  // Store upstream OAuth state and client credentials in session
   if (!session.oauth) {
     session.oauth = {};
   }
@@ -1289,8 +1320,8 @@ async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, 
   // Build upstream authorization URL
   const authUrl = new URL(upstreamOAuth.authorization_endpoint);
   authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('client_id', 'mcp-gateway'); // Default client ID for dynamic discovery
-  authUrl.searchParams.set('redirect_uri', `https://${getCurrentDomain(request)}/oauth/callback`);
+  authUrl.searchParams.set('client_id', clientCredentials.client_id);
+  authUrl.searchParams.set('redirect_uri', redirectUri);
   authUrl.searchParams.set('state', `${hostRoute.serverDomain}:${state}`);
   authUrl.searchParams.set('code_challenge', challenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
@@ -1300,6 +1331,55 @@ async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, 
   authUrl.searchParams.set('scope', scope);
   
   return Response.redirect(authUrl.toString(), 302);
+}
+
+// Register client with upstream OAuth server (RFC 7591)
+async function registerUpstreamClient(
+  serverDomain: string, 
+  redirectUri: string,
+  discovery: any
+): Promise<{ client_id: string; client_secret?: string; registered_at: number }> {
+  const registrationData = {
+    redirect_uris: [redirectUri],
+    client_name: `MCP Gateway for ${new URL(redirectUri).hostname}`,
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'client_secret_post',
+    scope: discovery.scopes_supported?.join(' ') || 'openid'
+  };
+  
+  const response = await fetch(discovery.registration_endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'User-Agent': 'MCP-OAuth-Gateway/1.0'
+    },
+    body: JSON.stringify(registrationData)
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`Client registration failed for ${serverDomain}:`, response.status, errorText);
+    throw new Error(`Client registration failed: ${response.status} ${errorText}`);
+  }
+  
+  const result = await response.json() as any;
+  
+  // Store registered client
+  registeredClients.set(serverDomain, {
+    client_id: result.client_id,
+    client_secret: result.client_secret,
+    registered_at: Date.now()
+  });
+  
+  console.log(`Successfully registered client for ${serverDomain}:`, result.client_id);
+  
+  return {
+    client_id: result.client_id,
+    client_secret: result.client_secret,
+    registered_at: Date.now()
+  };
 }
 
 // Dynamic upstream OAuth discovery
@@ -1446,32 +1526,16 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
     return new Response('PKCE verifier not found', { status: 400 });
   }
   
-  // Try to get server config, or discover dynamically
-  let serverConfig: MCPServerConfig | null = null;
-  
-  try {
-    const mcpServers: MCPServerConfig[] = JSON.parse(env.MCP_SERVERS || '[]');
-    serverConfig = mcpServers.find(s => s.domain === serverDomain) || null;
-  } catch (e) {
-    console.error('Failed to parse MCP_SERVERS:', e);
+  // Get client credentials for this server
+  const clientCredentials = registeredClients.get(serverDomain);
+  if (!clientCredentials) {
+    return new Response('No registered client found for server', { status: 400 });
   }
   
-  // If no pre-configured server, try dynamic discovery
-  if (!serverConfig) {
-    const upstreamOAuth = await discoverUpstreamOAuth(serverDomain);
-    if (!upstreamOAuth) {
-      return new Response('Server does not support OAuth or is not configured', { status: 400 });
-    }
-    
-    // Create dynamic server config
-    serverConfig = {
-      domain: serverDomain,
-      name: `Dynamic: ${serverDomain}`,
-      authzEndpoint: upstreamOAuth.authorization_endpoint,
-      tokenEndpoint: upstreamOAuth.token_endpoint,
-      clientId: 'mcp-gateway',
-      scopes: upstreamOAuth.scopes_supported?.[0] || 'openid'
-    };
+  // Discover upstream OAuth endpoints to get token endpoint
+  const upstreamOAuth = await discoverUpstreamOAuth(serverDomain);
+  if (!upstreamOAuth || !upstreamOAuth.token_endpoint) {
+    return new Response('Server does not support OAuth or token endpoint not found', { status: 400 });
   }
   
   // Exchange code for tokens
@@ -1479,15 +1543,15 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   tokenRequestBody.append('grant_type', 'authorization_code');
   tokenRequestBody.append('code', code);
   tokenRequestBody.append('redirect_uri', `https://${getCurrentDomain(request)}/oauth/callback`);
-  tokenRequestBody.append('client_id', serverConfig.clientId);
+  tokenRequestBody.append('client_id', clientCredentials.client_id);
   tokenRequestBody.append('code_verifier', oauthData.pkceVerifier);
   
-  if (serverConfig.clientSecret) {
-    tokenRequestBody.append('client_secret', serverConfig.clientSecret);
+  if (clientCredentials.client_secret) {
+    tokenRequestBody.append('client_secret', clientCredentials.client_secret);
   }
   
   try {
-    const tokenResponse = await fetch(serverConfig.tokenEndpoint, {
+    const tokenResponse = await fetch(upstreamOAuth.token_endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
