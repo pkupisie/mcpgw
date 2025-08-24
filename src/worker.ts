@@ -613,8 +613,11 @@ async function handleProtectedResourceMetadata(request: Request, hostRoute: MCPR
     resource: `https://${hostname}`,
     authorization_servers: [`https://${hostname}/.well-known/oauth-authorization-server`],
     scopes_supported: ['mcp', 'read', 'write'],
-    bearer_methods_supported: ['header'],
+    bearer_methods_supported: ['header', 'query'],
     resource_documentation: `https://${hostname}`,
+    
+    // Explicitly indicate that authentication is required
+    authentication_required: true,
     
     // MCP-specific metadata
     mcp_version: '1.0',
@@ -878,6 +881,8 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     if (codeData.resource) {
       tokenResponse.resource = codeData.resource;
     }
+    
+    console.log(`Sending token response to Claude:`, JSON.stringify(tokenResponse, null, 2));
     
     return new Response(JSON.stringify(tokenResponse), {
       headers: { 'Content-Type': 'application/json' }
