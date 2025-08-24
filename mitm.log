@@ -1,4 +1,0 @@
-MCP SSE+POST MITM listening on http://localhost:8787
-→ Upstream: https://mcp.atlassian.com
-→ Allowed POST paths: /v1/tools/call, /v1/tools/list
-[85eba716-8741-4777-9652-1dd1a29ec292] SSE upstream status 401

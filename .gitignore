@@ -4,6 +4,12 @@ node_modules/
 dist/
 .DS_Store
 .env
+.env.*
+!.env.example
 coverage/
 *.local
 tmp/
+test-results/
+cookies.txt
+pnpm-lock.yaml
+apps/*/test-results/

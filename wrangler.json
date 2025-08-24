@@ -1,11 +1,17 @@
 {
-  "name": "mcp",
-  "main": "src/worker.js",
+  "name": "mcp-oauth-gateway",
+  "main": "dist/worker.js",
   "compatibility_date": "2024-08-01",
   "observability": { "enabled": true },
   "vars": {
-    "ALLOW_PROTOCOLS": "https:,wss:",
-    "LOG_LEVEL": "debug",
-    "DOMAIN_ROOT": "copernicusone.com"
-  }
+    "DOMAIN_ROOT": "copernicusone.com",
+    "LOG_LEVEL": "info"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "SESSIONS",
+      "id": "your-kv-namespace-id",
+      "preview_id": "your-preview-kv-namespace-id"
+    }
+  ]
 }

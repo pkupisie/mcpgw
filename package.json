@@ -2,16 +2,28 @@
   "name": "mcpgw",
   "version": "1.0.0",
   "description": "",
+  "private": true,
   "main": "src/worker.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev:cf": "wrangler dev",
-    "deploy:cf": "wrangler deploy"
+    "build:worker": "tsc src/worker.ts --target es2020 --module es2020 --moduleResolution node --outDir dist --lib es2020 --skipLibCheck",
+    "dev": "wrangler dev",
+    "deploy": "npm run build:worker && wrangler deploy",
+    "build": "npm run build:worker && cd apps/gw && npm run build && cd ../mock-idp && npm run build",
+    "dev:gw": "cd apps/gw && npm run dev",
+    "dev:mock": "cd apps/mock-idp && npm run dev",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "pw:install": "npx playwright install --with-deps"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "wrangler": "^4.32.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250823.0",
+    "@playwright/test": "^1.47.2",
+    "typescript": "^5.5.4"
   }
 }
