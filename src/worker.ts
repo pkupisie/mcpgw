@@ -105,6 +105,12 @@ export default {
           return handleProtectedResourceMetadata(request, hostRoute, env);
         }
         
+        // Add login handler for encoded domains
+        if (url.pathname === '/login') {
+          if (request.method === 'GET') return handleLoginPage();
+          if (request.method === 'POST') return handleLogin(request, env);
+        }
+        
         if (url.pathname.startsWith('/oauth/')) {
           return handleLocalOAuth(request, hostRoute, env);
         }
