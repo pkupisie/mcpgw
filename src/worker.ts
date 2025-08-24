@@ -66,9 +66,12 @@ export default {
         return handleMCPRequest(request, hostRoute, env);
       }
       
-      // Landing domain routes (handle both custom domain and workers.dev)
-      const isLandingDomain = url.hostname.toLowerCase() === env.DOMAIN_ROOT.toLowerCase() ||
-                             url.hostname.toLowerCase().startsWith('mcp.') && url.hostname.includes('.workers.dev');
+      // Landing domain routes (handle custom domain, mcp.domain, and workers.dev)
+      const hostname = url.hostname.toLowerCase();
+      const domainRoot = env.DOMAIN_ROOT.toLowerCase();
+      const isLandingDomain = hostname === domainRoot ||
+                             hostname === `mcp.${domainRoot}` ||
+                             (hostname.startsWith('mcp.') && hostname.includes('.workers.dev'));
       
       if (isLandingDomain) {
         if (url.pathname === '/' || url.pathname === '') {
@@ -151,7 +154,7 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   if (!sessionId) {
     return new Response(JSON.stringify({ 
       error: 'Authentication required',
-      loginUrl: `https://${env.DOMAIN_ROOT}/login`
+      loginUrl: `https://${getCurrentDomain(request)}/login`
     }), { 
       status: 401,
       headers: { 'Content-Type': 'application/json' }
@@ -162,7 +165,7 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   if (!session || !session.localAuth) {
     return new Response(JSON.stringify({ 
       error: 'Authentication required',
-      loginUrl: `https://${env.DOMAIN_ROOT}/login`
+      loginUrl: `https://${getCurrentDomain(request)}/login`
     }), { 
       status: 401,
       headers: { 'Content-Type': 'application/json' }
@@ -175,7 +178,7 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
     return new Response(JSON.stringify({ 
       error: 'OAuth required for server',
       server: hostRoute.serverDomain,
-      authUrl: `https://${env.DOMAIN_ROOT}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`
+      authUrl: `https://${getCurrentDomain(request)}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`
     }), { 
       status: 401,
       headers: { 'Content-Type': 'application/json' }
@@ -216,7 +219,7 @@ async function handleDashboard(request: Request, env: Env): Promise<Response> {
   const session = sessionId ? await getSession(sessionId, env) : null;
   
   if (!session || !session.localAuth) {
-    return Response.redirect(`https://${env.DOMAIN_ROOT}/login`, 302);
+    return Response.redirect(`https://${getCurrentDomain(request)}/login`, 302);
   }
   
   // Parse MCP servers
@@ -307,7 +310,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
     }
   }
   
-  const response = Response.redirect(`https://${env.DOMAIN_ROOT}/`, 302);
+  const response = Response.redirect(`https://${getCurrentDomain(request)}/`, 302);
   response.headers.set('Set-Cookie', `session=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`);
   
   return response;
@@ -343,7 +346,7 @@ async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
   const authUrl = new URL(serverConfig.authzEndpoint);
   authUrl.searchParams.set('response_type', 'code');
   authUrl.searchParams.set('client_id', serverConfig.clientId);
-  authUrl.searchParams.set('redirect_uri', `https://${env.DOMAIN_ROOT}/oauth/callback`);
+  authUrl.searchParams.set('redirect_uri', `https://${getCurrentDomain(request)}/oauth/callback`);
   authUrl.searchParams.set('scope', serverConfig.scopes);
   authUrl.searchParams.set('state', `${serverDomain}:${state}`);
   authUrl.searchParams.set('code_challenge', challenge);
@@ -390,6 +393,10 @@ async function handleEncode(request: Request, env: Env): Promise<Response> {
 function generateEncodedHostname(domain: string, domainRoot: string): string {
   const encoded = base32Encode(domain);
   return `${encoded}-enc.${domainRoot}`;
+}
+
+function getCurrentDomain(request: Request): string {
+  return new URL(request.url).hostname;
 }
 
 function getSessionId(request: Request): string | null {
