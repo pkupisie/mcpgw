@@ -828,7 +828,8 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     
     if (!codeData || codeData.expires_at < Date.now()) {
       console.log(`Code lookup failed - codeData exists: ${!!codeData}, expired: ${codeData ? codeData.expires_at < Date.now() : 'N/A'}`);
-      console.log(`Available codes: ${Array.from(authorizationCodes.keys()).map(k => k.substring(0, 8) + '...').join(', ')}`);
+      console.log(`Available codes (${authorizationCodes.size}): ${Array.from(authorizationCodes.keys()).map(k => k.substring(0, 8) + '...').join(', ') || 'none'}`);
+      console.log(`Looking for: ${code?.substring(0, 8)}...`);
       return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Authorization code expired or not found' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
@@ -1641,6 +1642,7 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
       
       // Store code globally for cross-session access
       authorizationCodes.set(clientCode, codeData);
+      console.log(`Stored authorization code: ${clientCode.substring(0, 8)}..., total codes now: ${authorizationCodes.size}`);
       
       // Build redirect URL back to client
       const clientRedirectUrl = new URL(pendingAuth.redirect_uri);
