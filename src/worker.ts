@@ -194,8 +194,45 @@ function parseHostEncodedUpstream(hostname: string, domainRoot: string): MCPRout
 async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
   const hostname = new URL(request.url).hostname;
   
-  // First validate local OAuth token
+  // Check if this is an MCP client trying to connect
+  const mcpProtocolVersion = request.headers.get('mcp-protocol-version');
+  const userAgent = request.headers.get('user-agent');
   const authHeader = request.headers.get('Authorization');
+  
+  // If it's an MCP client without auth, try public proxy mode first
+  if (mcpProtocolVersion && (!authHeader || !authHeader.startsWith('Bearer '))) {
+    console.log('MCP client detected without OAuth, trying public proxy mode');
+    
+    // Try proxying to upstream without authentication
+    const upstreamUrl = new URL(request.url.replace(request.url.split('/')[2], hostRoute.upstreamBase.host));
+    
+    const upstreamHeaders: Record<string, string> = {};
+    request.headers.forEach((value, key) => {
+      if (key.toLowerCase() !== 'host') {
+        upstreamHeaders[key] = value;
+      }
+    });
+    upstreamHeaders['Host'] = hostRoute.upstreamBase.hostname;
+
+    const upstreamRequest = new Request(upstreamUrl.toString(), {
+      method: request.method,
+      headers: upstreamHeaders,
+      body: request.body,
+    });
+    
+    try {
+      const response = await fetch(upstreamRequest);
+      // If upstream works, return the response
+      if (response.status !== 401) {
+        return response;
+      }
+      // If upstream returns 401, fall through to OAuth requirement
+    } catch (error) {
+      console.log('Public proxy failed:', error);
+    }
+  }
+  
+  // If not an MCP client or public proxy failed, require local OAuth
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return new Response(JSON.stringify({ 
       error: 'Authentication required',
@@ -949,7 +986,7 @@ async function handleDeviceVerify(request: Request, hostRoute: MCPRouteInfo, env
       <label>Device Code: <input name="user_code" value="${user_code}" placeholder="123456" required></label><br><br>
       <button type="submit">Verify Device</button>
     </form>
-    <p><a href="${getCurrentDomain(request)}/login">Sign in first</a> if not already authenticated.</p>
+    <p><a href="https://${getCurrentDomain(request)}/login">Sign in first</a> if not already authenticated.</p>
   </body></html>`;
   
   return new Response(html, {
