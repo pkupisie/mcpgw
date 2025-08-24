@@ -17,7 +17,7 @@ export default {
       const url = new URL(request.url);
       log(rid, 'debug', 'request:start', {
         method: request.method,
-        url: url.toString(),
+        url: redactURL(url).toString(),
         path: url.pathname,
         search: url.search,
         ip: request.headers.get('cf-connecting-ip') || null,
@@ -69,18 +69,13 @@ export default {
       // Remaining path segments (if any) are appended to upstream path.
       const { encoded, restPath } = splitEncodedPath(url.pathname);
       if (!encoded) return badRequest('Missing encoded upstream URL in path');
-
       const upstreamBase = decodeB64UrlToURL(encoded);
       if (!upstreamBase) return badRequest('Invalid base64url for upstream');
-
       if (!allowProtocol(upstreamBase.protocol, env)) {
         return badRequest('Upstream protocol not allowed');
       }
-
-      // Build final upstream URL
       const upstreamURL = new URL(upstreamBase.href);
       if (restPath) upstreamURL.pathname = joinPaths(upstreamURL.pathname, restPath);
-      // Merge query strings: client query overrides upstream duplicates
       if (url.search) {
         const incoming = new URLSearchParams(url.search);
         for (const [k, v] of incoming.entries()) upstreamURL.searchParams.set(k, v);
@@ -88,7 +83,7 @@ export default {
       log(rid, 'debug', 'route:encoded', {
         encoded,
         restPath,
-        upstream: upstreamURL.toString(),
+        upstream: redactURL(upstreamURL).toString(),
       }, lvl);
 
       // WebSocket tunneling
@@ -349,6 +344,20 @@ function redactHeadersObj(obj) {
     else out[k] = obj[k];
   }
   return out;
+}
+
+// Redact sensitive query values in logged URLs (e.g., tokens)
+function redactURL(u) {
+  try {
+    const url = new URL(u.toString());
+    const sensitive = ['access_token','token','code','client_secret','assertion','credential','auth','authorization'];
+    for (const key of sensitive) {
+      if (url.searchParams.has(key)) url.searchParams.set(key, '***');
+    }
+    return url;
+  } catch {
+    return u;
+  }
 }
 
 function html(body, status = 200) {
