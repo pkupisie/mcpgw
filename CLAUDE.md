@@ -1,14 +1,14 @@
 # MCP OAuth Gateway
 
-A production-ready authentication gateway implementing CLIENT → GATEWAY → MCP SERVER architecture with OAuth 2.1 + PKCE security, deployed as a Cloudflare Worker.
+A production-ready Cloudflare Worker that provides secure OAuth authentication for multiple MCP servers via hostname-based routing.
 
 ## Business Architecture
 
 **Target Users**: Developers using Claude.ai, ChatGPT, or other AI assistants that support MCP (Model Context Protocol)
 
-**Problem Solved**: AI assistants need secure, authenticated access to multiple MCP servers (Atlassian, GitHub, etc.) without exposing OAuth credentials or handling complex authentication flows.
+**Problem Solved**: AI assistants need secure access to multiple MCP servers (Atlassian, GitHub, etc.) without exposing OAuth credentials or handling complex authentication flows.
 
-**Solution**: A single OAuth gateway that handles authentication for multiple MCP servers via hostname-based routing.
+**Solution**: A single OAuth gateway that handles browser-based authentication for multiple MCP servers via encoded hostnames.
 
 ## Technical Architecture
 
@@ -18,16 +18,16 @@ Claude.ai/ChatGPT → Cloudflare Worker → MCP Server (Atlassian/GitHub/etc)
 ```
 
 ### Deployment: Cloudflare Worker
-- **Production**: Single Worker handling all traffic
+- **Production**: Single Worker handling all traffic  
 - **Zero-config scaling**: Cloudflare's global edge network
-- **Built-in KV storage**: For session management
-- **WebSocket support**: Full bidirectional tunneling
+- **In-memory sessions**: Ephemeral but simple (resets on worker restart)
+- **Multi-domain support**: Works on both custom domain and *.workers.dev
 
 ### Hostname-Based MCP Server Routing
 - **Format**: `{base32(domain)}-enc.copernicusone.com`
-- **Example**: `mcp.atlassian.com` → `nvrxaltborwgc43tnfqw4ltdn5wq-enc.copernicusone.com`
-- **Per-Server OAuth**: Independent authentication per MCP server
-- **Dynamic Discovery**: Add new servers via dashboard
+- **Example**: `mcp.atlassian.com` → `nvrxaltborwgc43tnfqw4ltdn5wq-enc.copernicusone.com`  
+- **Per-Server OAuth**: Independent OAuth 2.1 + PKCE authentication per MCP server
+- **Browser-Based Flow**: User logs in via web interface, then OAuth per server
 
 ## Business Logic Flow
 
@@ -47,17 +47,18 @@ MCP_SERVERS = '[
 ```
 
 ### 2. AI Assistant Integration
-1. **Developer Setup**: Visit `https://copernicusone.com` dashboard
-2. **URL Generation**: Enter MCP server domain → get encoded URL
-3. **Claude.ai Configuration**: Use encoded URL as MCP server endpoint
-4. **First Request**: Redirects to OAuth flow for that specific server
-5. **Subsequent Requests**: Automatic Bearer token injection
+1. **Developer Setup**: Visit `https://mcp.copernicusone.com` or `https://mcp.piotr-93c.workers.dev` dashboard
+2. **Gateway Login**: Authenticate with LOCAL_USER/LOCAL_PASSWORD  
+3. **URL Generation**: Enter MCP server domain → get encoded URL
+4. **OAuth Setup**: Connect to each MCP server via browser-based OAuth flow
+5. **Claude.ai Configuration**: Use encoded URLs as MCP server endpoints
+6. **API Requests**: Automatic Bearer token injection for authenticated servers
 
-### 3. Authentication & Authorization
-- **Gateway Auth**: Simple user/password (configurable via secrets)
-- **MCP Server Auth**: OAuth 2.1 + PKCE per server
-- **Token Storage**: Encrypted in Cloudflare KV with TTL
-- **Security**: CSRF protection, rate limiting, secure cookies
+### 3. Authentication & Authorization  
+- **Gateway Auth**: Browser login with LOCAL_USER/LOCAL_PASSWORD
+- **MCP Server Auth**: OAuth 2.1 + PKCE per server via browser
+- **Session Storage**: In-memory Map (ephemeral, resets on restart)
+- **Security**: CSRF protection, secure cookies, hostname validation
 
 ## Commands
 
@@ -69,19 +70,23 @@ MCP_SERVERS = '[
 - `npm run dev:gw` - Start Node.js gateway (alternative architecture)
 
 ### Cloudflare Setup
-1. **Create KV Namespace**: `wrangler kv:namespace create "SESSIONS"`
-2. **Update wrangler.json**: Add your KV namespace ID
-3. **Set Secrets**: `wrangler secret put LOCAL_USER`
-4. **Deploy**: `npm run deploy`
+1. **Set Secrets**: Configure required secrets
+   ```bash
+   wrangler secret put LOCAL_USER
+   wrangler secret put LOCAL_PASSWORD  
+   wrangler secret put MCP_SERVERS
+   ```
+2. **Deploy**: `npm run deploy`
 
 ## Environment Configuration
 
-### Cloudflare Worker Secrets (via `wrangler secret put`)
+### Required Cloudflare Worker Secrets
 ```bash
+# Gateway authentication
 wrangler secret put LOCAL_USER
 wrangler secret put LOCAL_PASSWORD
-wrangler secret put SESSION_SECRET
-wrangler secret put TOKEN_ENCRYPTION_KEY
+
+# MCP server OAuth configurations  
 wrangler secret put MCP_SERVERS
 ```
 
@@ -98,10 +103,10 @@ wrangler secret put MCP_SERVERS
 ## Key Implementation Details
 
 ### Security Features
-- **OAuth 2.1 PKCE (S256)**: Industry-standard security
-- **Token Encryption**: AES-256-GCM for stored tokens
-- **Session Management**: Cloudflare KV with TTL expiration
-- **CSRF Protection**: Double-submit cookie pattern
+- **OAuth 2.1 PKCE (S256)**: Industry-standard security for MCP server auth
+- **Session Management**: In-memory with automatic cleanup  
+- **CSRF Protection**: Random token validation
+- **Hostname Validation**: Dynamic redirect URLs prevent hijacking
 - **Rate Limiting**: Built-in Cloudflare protection
 
 ### API Endpoints
@@ -149,7 +154,7 @@ wrangler secret put MCP_SERVERS
 
 ### Scaling
 - **Cloudflare Workers**: Auto-scaling to millions of requests
-- **KV Storage**: Eventually consistent, suitable for sessions
+- **In-Memory Sessions**: Fast but ephemeral (resets on worker restart)  
 - **Global Edge**: Sub-100ms response times worldwide
 
 ### Monitoring
@@ -166,10 +171,11 @@ wrangler secret put MCP_SERVERS
 ## Troubleshooting
 
 ### Common Issues
-- **KV Namespace**: Ensure SESSIONS KV namespace is created and ID is correct
+- **Domain Access**: Worker supports both `mcp.copernicusone.com` and `mcp.*.workers.dev`
 - **Secrets**: Verify all required secrets are set via `wrangler secret list`
-- **MCP_SERVERS**: Ensure JSON format is valid in worker secrets
-- **OAuth Redirects**: Verify redirect_uri matches deployed worker URL
+- **MCP_SERVERS**: Ensure JSON format is valid in worker secrets  
+- **OAuth Redirects**: URLs dynamically use current hostname (no hardcoded domains)
+- **Session Loss**: In-memory sessions reset on worker restart (re-login required)
 
 ### Development
 - **Local Testing**: Use `npm run dev` for Wrangler dev server
