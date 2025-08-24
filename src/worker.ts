@@ -45,8 +45,11 @@ export default {
         return handleMCPRequest(request, hostRoute, env);
       }
       
-      // Landing domain routes
-      if (url.hostname.toLowerCase() === env.DOMAIN_ROOT.toLowerCase()) {
+      // Landing domain routes (handle both custom domain and workers.dev)
+      const isLandingDomain = url.hostname.toLowerCase() === env.DOMAIN_ROOT.toLowerCase() ||
+                             url.hostname.toLowerCase().startsWith('mcp.') && url.hostname.includes('.workers.dev');
+      
+      if (isLandingDomain) {
         if (url.pathname === '/' || url.pathname === '') {
           return handleDashboard(request, env);
         }
