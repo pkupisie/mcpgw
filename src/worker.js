@@ -65,25 +65,31 @@ export default {
         return resp;
       }
 
-      // The first segment is the base64url-encoded full upstream URL.
-      // Remaining path segments (if any) are appended to upstream path.
-      const { encoded, restPath } = splitEncodedPath(url.pathname);
-      if (!encoded) return badRequest('Missing encoded upstream URL in path');
-      const upstreamBase = decodeB64UrlToURL(encoded);
-      if (!upstreamBase) return badRequest('Invalid base64url for upstream');
-      if (!allowProtocol(upstreamBase.protocol, env)) {
-        return badRequest('Upstream protocol not allowed');
+      // Default upstream mode: ignore encoded path; route based on DEFAULT_UPSTREAM
+      const defaultUpstream = env.DEFAULT_UPSTREAM || 'https://mcp.atlassian.com/v1/sse';
+      let defaultURL;
+      try { defaultURL = new URL(defaultUpstream); }
+      catch { return badRequest('DEFAULT_UPSTREAM invalid'); }
+      if (!allowProtocol(defaultURL.protocol, env)) return badRequest('Upstream protocol not allowed');
+
+      const wantsSSE = request.method.toUpperCase() === 'GET' && (
+        (request.headers.get('accept') || '').includes('text/event-stream') ||
+        url.pathname === '/v1/sse' || url.pathname.endsWith('/sse')
+      );
+
+      let upstreamURL = new URL(defaultURL.href);
+      if (!wantsSSE) {
+        // Route other traffic to same origin with original path
+        upstreamURL = new URL(defaultURL.origin);
+        upstreamURL.pathname = url.pathname;
       }
-      const upstreamURL = new URL(upstreamBase.href);
-      if (restPath) upstreamURL.pathname = joinPaths(upstreamURL.pathname, restPath);
       if (url.search) {
         const incoming = new URLSearchParams(url.search);
         for (const [k, v] of incoming.entries()) upstreamURL.searchParams.set(k, v);
       }
-      log(rid, 'debug', 'route:encoded', {
-        encoded,
-        restPath,
+      log(rid, 'debug', 'route:default', {
         upstream: redactURL(upstreamURL).toString(),
+        wantsSSE,
       }, lvl);
 
       // WebSocket tunneling
