@@ -344,13 +344,30 @@ async function buildUpstreamInit(request, upstreamURL, env) {
 }
 
 function corsPreflight(request) {
+  const origin = request.headers.get('origin');
   const reqHeaders = request.headers.get('Access-Control-Request-Headers') || '';
   const reqMethod = request.headers.get('Access-Control-Request-Method') || 'GET';
   const headers = new Headers();
-  headers.set('Access-Control-Allow-Origin', request.headers.get('origin') || '*');
+  
+  // Echo the exact origin for credentials support (not *)
+  headers.set('Access-Control-Allow-Origin', origin || '*');
   headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  headers.set('Access-Control-Allow-Headers', reqHeaders || '*');
+  
+  // Always include Authorization, Content-Type, and mcp-session-id in allowed headers
+  const allowedHeaders = new Set(['authorization', 'content-type', 'mcp-session-id']);
+  if (reqHeaders) {
+    reqHeaders.split(',').forEach(h => allowedHeaders.add(h.trim().toLowerCase()));
+  }
+  headers.set('Access-Control-Allow-Headers', Array.from(allowedHeaders).join(', '));
+  
+  // Add credentials support
+  if (origin) {
+    headers.set('Access-Control-Allow-Credentials', 'true');
+  }
+  
   headers.set('Access-Control-Max-Age', '600');
+  headers.set('Access-Control-Expose-Headers', 'mcp-session-id');
+  
   return new Response(null, { status: 204, headers });
 }
 
@@ -382,7 +399,7 @@ function copyForwardableHeaders(inHeaders, outHeaders) {
   for (const [k, v] of filtered.entries()) outHeaders.set(k, v);
 }
 
-function filterResponseHeaders(inHeaders, { forceSSE = false } = {}) {
+function filterResponseHeaders(inHeaders, { forceSSE = false, origin = null } = {}) {
   // Only drop hop-by-hop headers that MUST be removed per HTTP spec
   const hopByHop = new Set([
     'connection',
@@ -400,11 +417,24 @@ function filterResponseHeaders(inHeaders, { forceSSE = false } = {}) {
     if (hopByHop.has(key)) continue;
     out.set(k, v); // Pass everything else through transparently
   }
-  // Only add CORS if not already present from upstream
+  
+  // Handle CORS properly for credentials
   if (!out.has('Access-Control-Allow-Origin')) {
-    out.set('Access-Control-Allow-Origin', '*');
+    // Echo exact origin for credentials support, fallback to * if no origin
+    out.set('Access-Control-Allow-Origin', origin || '*');
     out.set('Vary', addVary(out.get('Vary'), 'Origin'));
   }
+  
+  // Add credentials support if origin is present
+  if (origin && !out.has('Access-Control-Allow-Credentials')) {
+    out.set('Access-Control-Allow-Credentials', 'true');
+  }
+  
+  // Ensure mcp-session-id is exposed
+  if (!out.has('Access-Control-Expose-Headers')) {
+    out.set('Access-Control-Expose-Headers', 'mcp-session-id');
+  }
+  
   return out;
 }
 
@@ -608,7 +638,8 @@ async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
   const contentType = upstreamResp.headers.get('content-type') || '';
   const contentLength = upstreamResp.headers.get('content-length') || 'stream';
   const isSSE = contentType.includes('text/event-stream');
-  const respHeaders = filterResponseHeaders(upstreamResp.headers);
+  const origin = request.headers.get('origin');
+  const respHeaders = filterResponseHeaders(upstreamResp.headers, { origin });
   const elapsed = Date.now() - start;
   
   log(rid, 'info', 'upstream:response', {
@@ -626,6 +657,13 @@ async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
     respHeadersObj[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
   }
   log(rid, 'debug', 'upstream:response-headers', respHeadersObj, lvl);
+  
+  // Log filtered response headers that will be sent to client
+  const filteredHeadersObj = {};
+  for (const [k, v] of respHeaders.entries()) {
+    filteredHeadersObj[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
+  }
+  log(rid, 'debug', 'client:response-headers', filteredHeadersObj, lvl);
   
   if (upstreamResp.status >= 400) {
     log(rid, 'warn', 'upstream:error-status', {
