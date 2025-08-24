@@ -54,8 +54,8 @@ export default {
       }
       if (url.pathname === '/healthz') return json({ ok: true });
 
-      // CORS preflight
-      if (request.method === 'OPTIONS') {
+      // CORS preflight: only when Access-Control-Request-Method is present
+      if (request.method === 'OPTIONS' && request.headers.get('access-control-request-method')) {
         const resp = corsPreflight(request);
         log(rid, 'debug', 'cors:preflight', {
           origin: request.headers.get('origin') || null,
@@ -251,10 +251,10 @@ function corsPreflight(request) {
 function filterRequestHeaders(inHeaders) {
   const hopByHop = new Set([
     'connection','keep-alive','proxy-authenticate','proxy-authorization',
-    'te','trailer','transfer-encoding','upgrade','accept-encoding'
+    'te','trailer','transfer-encoding','upgrade','accept-encoding','host','content-length'
   ]);
   const allowNames = new Set([
-    'authorization','content-type','accept','user-agent','origin','referer','cache-control','pragma'
+    'authorization','content-type','accept','accept-language','user-agent','origin','referer','cache-control','pragma','if-none-match','if-modified-since','range'
   ]);
   const out = new Headers();
   for (const [k, v] of inHeaders.entries()) {
@@ -285,6 +285,7 @@ function filterResponseHeaders(inHeaders, { forceSSE = false } = {}) {
   }
   // CORS echo for browsers
   out.set('Access-Control-Allow-Origin', '*');
+  out.set('Access-Control-Expose-Headers', '*, X-MCP-Request-Id, x-mcp-request-id');
   out.set('Vary', addVary(out.get('Vary'), 'Origin'));
   if (forceSSE) {
     out.set('Content-Type', 'text/event-stream; charset=utf-8');
