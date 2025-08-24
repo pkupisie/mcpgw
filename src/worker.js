@@ -322,9 +322,17 @@ async function handleWebSocket(clientRequest, upstreamURL, env) {
   return new Response(null, { status: 101, webSocket: workerSocket });
 }
 
-async function buildUpstreamInit(request, env) {
+async function buildUpstreamInit(request, upstreamURL, env) {
   const method = request.method.toUpperCase();
-  const init = { method, headers: filterRequestHeaders(request.headers) };
+  const headers = filterRequestHeaders(request.headers);
+  
+  // Set the correct Host header for the upstream
+  if (upstreamURL) {
+    const upstreamHost = new URL(upstreamURL).hostname;
+    headers.set('Host', upstreamHost);
+  }
+  
+  const init = { method, headers };
 
   if (!['GET', 'HEAD'].includes(method)) {
     // Pass-through body as-is (exact stream) without parsing or rebuilding
@@ -347,15 +355,19 @@ function corsPreflight(request) {
 }
 
 function filterRequestHeaders(inHeaders) {
-  // Forward all headers verbatim except hop-by-hop and restricted ones the platform sets itself
+  // Forward all headers verbatim except hop-by-hop and restricted ones
+  // We'll set the host header separately based on the upstream URL
   const drop = new Set([
     'connection','keep-alive','proxy-authenticate','proxy-authorization',
-    'te','trailer','transfer-encoding','upgrade','host'
+    'te','trailer','transfer-encoding','upgrade','host',
+    'cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-ipcountry', // Remove Cloudflare-specific headers
+    'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip' // Remove proxy headers that might confuse upstream
   ]);
   const out = new Headers();
   for (const [k, v] of inHeaders.entries()) {
     const key = k.toLowerCase();
     if (drop.has(key)) continue;
+    if (key.startsWith('cf-')) continue; // Drop all CF headers
     out.set(k, v);
   }
   return out;
@@ -545,7 +557,7 @@ function selectUpstreamForRequest(upstreamBase, reqUrl, request) {
 }
 
 async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
-  const init = initOpt || (await buildUpstreamInit(request));
+  const init = initOpt || (await buildUpstreamInit(request, upstreamURL));
   
   log(rid, 'info', 'upstream:request', {
     method: init.method,
