@@ -168,6 +168,37 @@ wrangler secret put MCP_SERVERS
 - **WAF Rules**: Customizable web application firewall
 - **Secret Management**: Cloudflare Worker secrets (encrypted at rest)
 
+## Current Development Status
+
+### 🚧 ACTIVE TODO: Atlassian OAuth Domain Allowlist Issue
+
+**Problem**: Atlassian MCP server rejects redirect URIs from encoded domains despite successful dynamic client registration.
+
+**Error**: `"The redirect URI is not allowed, the URL is not part of Atlassian allowlisted domains for registered MCP Clients. Redirect URI https://nvrxaltborwgc43tnfqw4ltdn5wq-enc.copernicusone.com/oauth/callback"`
+
+**Current Status**: 
+- ✅ Dynamic client registration implemented and working
+- ✅ Registered client_id being used correctly  
+- ❌ Atlassian still rejects encoded domain redirect URIs
+
+**Next Steps**:
+1. **Complete Landing Domain OAuth Callback Handler**:
+   - Landing domain (`mcp.copernicusone.com`) receives OAuth callback from Atlassian
+   - Extract tokens and server domain from callback
+   - Redirect back to encoded domain to complete client authorization
+   
+2. **Update State Management**:
+   - Store original encoded domain in OAuth state
+   - Handle cross-domain session/token transfer
+   
+3. **Test Complete Flow**:
+   - Claude → Encoded Domain → Atlassian (via landing domain redirect) → Landing Domain → Encoded Domain → Claude
+
+**Implementation**: Currently using `https://mcp.copernicusone.com/oauth/callback` for upstream registration to satisfy Atlassian's domain allowlist.
+
+### Commit Log
+- `78a483d`: fix: use landing domain redirect URI for Atlassian OAuth registration
+
 ## Troubleshooting
 
 ### Common Issues
@@ -176,6 +207,7 @@ wrangler secret put MCP_SERVERS
 - **MCP_SERVERS**: Ensure JSON format is valid in worker secrets  
 - **OAuth Redirects**: URLs dynamically use current hostname (no hardcoded domains)
 - **Session Loss**: In-memory sessions reset on worker restart (re-login required)
+- **Atlassian Domain Allowlist**: Use landing domain for OAuth callbacks due to Atlassian's domain restrictions
 
 ### Development
 - **Local Testing**: Use `npm run dev` for Wrangler dev server
