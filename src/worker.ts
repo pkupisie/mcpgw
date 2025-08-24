@@ -129,7 +129,7 @@ export default {
         
         // Add login handler for encoded domains
         if (url.pathname === '/login') {
-          if (request.method === 'GET') return handleLoginPage();
+          if (request.method === 'GET') return handleLoginPage(request);
           if (request.method === 'POST') return handleLogin(request, env);
         }
         
@@ -154,7 +154,7 @@ export default {
         }
         
         if (url.pathname === '/login') {
-          if (request.method === 'GET') return handleLoginPage();
+          if (request.method === 'GET') return handleLoginPage(request);
           if (request.method === 'POST') return handleLogin(request, env);
         }
         
@@ -461,12 +461,15 @@ async function handleDashboard(request: Request, env: Env): Promise<Response> {
 }
 
 // Login handlers
-function handleLoginPage(): Response {
+function handleLoginPage(request: Request): Response {
+  const returnTo = new URL(request.url).searchParams.get('return_to') || '';
+  
   const html = `<!doctype html><html><body>
     <h1>MCP Gateway Login</h1>
     <form method="POST" action="/login">
       <label>User: <input name="user" required></label><br><br>
       <label>Pass: <input name="pass" type="password" required></label><br><br>
+      <input type="hidden" name="return_to" value="${returnTo}">
       <button type="submit">Sign in</button>
     </form>
   </body></html>`;
