@@ -101,6 +101,10 @@ export default {
           return handleOAuthDiscovery(request, hostRoute, env);
         }
         
+        if (url.pathname === '/.well-known/oauth-protected-resource') {
+          return handleProtectedResourceMetadata(request, hostRoute, env);
+        }
+        
         if (url.pathname.startsWith('/oauth/')) {
           return handleLocalOAuth(request, hostRoute, env);
         }
@@ -234,14 +238,16 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   
   // If not an MCP client or public proxy failed, require local OAuth
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    const metadataUrl = `https://${hostname}/.well-known/oauth-authorization-server`;
     return new Response(JSON.stringify({ 
       error: 'Authentication required',
-      error_description: 'Bearer token required'
+      error_description: 'Bearer token required',
+      authorization_servers: [metadataUrl]
     }), { 
       status: 401,
       headers: { 
         'Content-Type': 'application/json',
-        'WWW-Authenticate': 'Bearer'
+        'WWW-Authenticate': `Bearer realm="MCP Gateway", authorization_uri="${metadataUrl}"`
       }
     });
   }
@@ -476,6 +482,7 @@ async function handleLogin(request: Request, env: Env): Promise<Response> {
 async function handleOAuthDiscovery(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
   const hostname = new URL(request.url).hostname;
   
+  // MCP-compliant OAuth 2.0 Authorization Server Metadata (RFC 8414)
   const discovery = {
     issuer: `https://${hostname}`,
     authorization_endpoint: `https://${hostname}/oauth/authorize`,
@@ -483,15 +490,72 @@ async function handleOAuthDiscovery(request: Request, hostRoute: MCPRouteInfo, e
     device_authorization_endpoint: `https://${hostname}/oauth/device`,
     revocation_endpoint: `https://${hostname}/oauth/revoke`,
     introspection_endpoint: `https://${hostname}/oauth/introspect`,
+    
+    // MCP-required fields
     response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code'],
-    code_challenge_methods_supported: ['S256'],
-    token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
-    scopes_supported: ['openid', 'profile', 'email', 'mcp'],
-    device_authorization_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none']
+    grant_types_supported: [
+      'authorization_code', 
+      'refresh_token', 
+      'urn:ietf:params:oauth:grant-type:device_code'
+    ],
+    code_challenge_methods_supported: ['S256'], // PKCE required
+    token_endpoint_auth_methods_supported: [
+      'client_secret_post', 
+      'client_secret_basic', 
+      'none'
+    ],
+    device_authorization_endpoint_auth_methods_supported: [
+      'client_secret_post', 
+      'client_secret_basic', 
+      'none'
+    ],
+    
+    // Scopes - MCP spec doesn't define required scopes, but common ones
+    scopes_supported: ['mcp', 'read', 'write'],
+    
+    // Additional OAuth 2.1 fields
+    response_modes_supported: ['query', 'fragment'],
+    subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'],
+    
+    // Resource server identification (RFC 8707)
+    resource_parameter_supported: true,
+    
+    // Service documentation
+    service_documentation: `https://${hostname}`,
+    op_policy_uri: `https://${hostname}/privacy`,
+    op_tos_uri: `https://${hostname}/terms`
   };
   
   return new Response(JSON.stringify(discovery, null, 2), {
+    headers: { 
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Cache-Control': 'max-age=3600'
+    }
+  });
+}
+
+// Protected resource metadata (RFC 9728)
+async function handleProtectedResourceMetadata(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const hostname = new URL(request.url).hostname;
+  
+  const metadata = {
+    resource: `https://${hostname}`,
+    authorization_servers: [`https://${hostname}/.well-known/oauth-authorization-server`],
+    scopes_supported: ['mcp', 'read', 'write'],
+    bearer_methods_supported: ['header'],
+    resource_documentation: `https://${hostname}`,
+    
+    // MCP-specific metadata
+    mcp_version: '1.0',
+    upstream_server: hostRoute.serverDomain,
+    capabilities: ['tools', 'resources', 'prompts']
+  };
+  
+  return new Response(JSON.stringify(metadata, null, 2), {
     headers: { 
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
@@ -545,6 +609,7 @@ async function handleLocalOAuthAuthorize(request: Request, hostRoute: MCPRouteIn
   const state = params.get('state');
   const code_challenge = params.get('code_challenge');
   const code_challenge_method = params.get('code_challenge_method');
+  const resource = params.get('resource'); // RFC 8707 resource parameter
   
   // Validate required parameters
   if (response_type !== 'code') {
@@ -573,6 +638,7 @@ async function handleLocalOAuthAuthorize(request: Request, hostRoute: MCPRouteIn
     <p><strong>Application:</strong> ${client_id}</p>
     <p><strong>Server:</strong> ${hostRoute.serverDomain}</p>
     <p><strong>Scopes:</strong> ${scope || 'default'}</p>
+    ${resource ? `<p><strong>Resource:</strong> ${resource}</p>` : ''}
     <form method="POST" action="/oauth/authorize">
       <input type="hidden" name="response_type" value="${response_type}">
       <input type="hidden" name="client_id" value="${client_id}">
@@ -581,6 +647,7 @@ async function handleLocalOAuthAuthorize(request: Request, hostRoute: MCPRouteIn
       <input type="hidden" name="state" value="${state || ''}">
       <input type="hidden" name="code_challenge" value="${code_challenge || ''}">
       <input type="hidden" name="code_challenge_method" value="${code_challenge_method || ''}">
+      <input type="hidden" name="resource" value="${resource || ''}">
       <button type="submit" name="action" value="authorize">Authorize</button>
       <button type="submit" name="action" value="deny">Deny</button>
     </form>
@@ -626,6 +693,7 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
     scope: formData.get('scope') as string,
     code_challenge: formData.get('code_challenge') as string,
     code_challenge_method: formData.get('code_challenge_method') as string,
+    resource: formData.get('resource') as string, // RFC 8707 resource parameter
     domain: hostname,
     expires_at: Date.now() + 600000 // 10 minutes
   };
@@ -701,13 +769,20 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       client_id: codeData.client_id
     };
     
-    return new Response(JSON.stringify({
+    const tokenResponse: any = {
       access_token,
       refresh_token,
       token_type: 'Bearer',
       expires_in,
       scope: codeData.scope
-    }), {
+    };
+    
+    // Include resource parameter in response if provided (RFC 8707)
+    if (codeData.resource) {
+      tokenResponse.resource = codeData.resource;
+    }
+    
+    return new Response(JSON.stringify(tokenResponse), {
       headers: { 'Content-Type': 'application/json' }
     });
   }
