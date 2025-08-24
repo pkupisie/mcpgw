@@ -21,19 +21,22 @@ export default {
     }
     try {
       const url = new URL(request.url);
+      // Prepare headers for logging
+      const incomingHeaders = {};
+      for (const [k, v] of request.headers.entries()) {
+        incomingHeaders[k] = k.toLowerCase() === 'authorization' || k.toLowerCase() === 'cookie' ? 'REDACTED' : v;
+      }
+      
       log(rid, 'info', 'request:start', {
         method: request.method,
         path: url.pathname,
         search: url.search,
         ip: request.headers.get('cf-connecting-ip') || 'unknown',
         cf_ray: request.headers.get('cf-ray') || 'none',
+        headers: incomingHeaders,
       }, lvl);
       
-      // Log all incoming request headers for debugging
-      const incomingHeaders = {};
-      for (const [k, v] of request.headers.entries()) {
-        incomingHeaders[k] = k.toLowerCase() === 'authorization' || k.toLowerCase() === 'cookie' ? 'REDACTED' : v;
-      }
+      // Also log at debug level for consistency
       log(rid, 'debug', 'request:headers', incomingHeaders, lvl);
 
       // Check if this is the landing page subdomain
@@ -57,11 +60,19 @@ export default {
         log(rid, 'info', 'route:landing', { path: url.pathname }, lvl);
         
         const elapsed = Date.now() - start;
+        
+        // Log response headers
+        const respHeadersObj = {};
+        for (const [k, v] of resp.headers.entries()) {
+          respHeadersObj[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
+        }
+        
         log(rid, 'info', 'response:complete', {
           status: 200,
           elapsed_ms: elapsed,
           route: 'landing',
           content_type: 'text/html',
+          headers: respHeadersObj,
         }, lvl);
         
         return resp;
@@ -106,11 +117,19 @@ export default {
         log(rid, 'info', 'route:encode', { target, domain: domainOnly, encoded: encoded.substring(0, 20) + '...' }, lvl);
         
         const elapsed = Date.now() - start;
+        
+        // Log response headers
+        const respHeadersObj = {};
+        for (const [k, v] of resp.headers.entries()) {
+          respHeadersObj[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
+        }
+        
         log(rid, 'info', 'response:complete', {
           status: 200,
           elapsed_ms: elapsed,
           route: 'encode',
           content_type: 'application/json',
+          headers: respHeadersObj,
         }, lvl);
         
         return resp;
@@ -120,11 +139,19 @@ export default {
         const resp = json({ ok: true, timestamp: new Date().toISOString(), log_level: lvl });
         
         const elapsed = Date.now() - start;
+        
+        // Log response headers
+        const respHeadersObj = {};
+        for (const [k, v] of resp.headers.entries()) {
+          respHeadersObj[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
+        }
+        
         log(rid, 'info', 'response:complete', {
           status: 200,
           elapsed_ms: elapsed,
           route: 'healthz',
           content_type: 'application/json',
+          headers: respHeadersObj,
         }, lvl);
         
         return resp;
@@ -139,10 +166,18 @@ export default {
         }, lvl);
         
         const elapsed = Date.now() - start;
+        
+        // Log response headers
+        const respHeadersObj = {};
+        for (const [k, v] of resp.headers.entries()) {
+          respHeadersObj[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
+        }
+        
         log(rid, 'info', 'response:complete', {
           status: 204,
           elapsed_ms: elapsed,
           route: 'cors-preflight',
+          headers: respHeadersObj,
         }, lvl);
         
         return resp;
@@ -174,11 +209,19 @@ export default {
         
         // Log final response completion
         const elapsed = Date.now() - start;
+        
+        // Log response headers
+        const finalRespHeaders = {};
+        for (const [k, v] of response.headers.entries()) {
+          finalRespHeaders[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
+        }
+        
         log(rid, 'info', 'response:complete', {
           status: response.status,
           elapsed_ms: elapsed,
           route: 'host-encoded',
           content_type: response.headers.get('content-type') || 'none',
+          headers: finalRespHeaders,
         }, lvl);
         
         return response;
@@ -193,13 +236,22 @@ export default {
       
       // Log final response
       const elapsed = Date.now() - start;
+      const errResp = json({ error: 'Missing host-encoded upstream', hint: 'Use the landing page to generate a base32 host under your domain root.' }, 400);
+      
+      // Log response headers
+      const errRespHeaders = {};
+      for (const [k, v] of errResp.headers.entries()) {
+        errRespHeaders[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
+      }
+      
       log(rid, 'info', 'response:complete', {
         status: 400,
         elapsed_ms: elapsed,
         route: 'missing-upstream',
+        headers: errRespHeaders,
       }, lvl);
       
-      return json({ error: 'Missing host-encoded upstream', hint: 'Use the landing page to generate a base32 host under your domain root.' }, 400);
+      return errResp;
     } catch (err) {
       log(rid, 'error', 'proxy:error', { 
         message: String(err?.message || err),
@@ -597,17 +649,20 @@ function selectUpstreamForRequest(upstreamBase, reqUrl, request) {
 async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
   const init = initOpt || (await buildUpstreamInit(request, upstreamURL));
   
-  log(rid, 'info', 'upstream:request', {
-    method: init.method,
-    url: redactURL(upstreamURL).toString(),
-    body_len: request.headers.get('content-length') || '0',
-  }, lvl);
-  
-  // Log all request headers for debugging
+  // Prepare headers for logging
   const reqHeadersObj = {};
   for (const [k, v] of init.headers.entries()) {
     reqHeadersObj[k] = k.toLowerCase() === 'authorization' ? 'REDACTED' : v;
   }
+  
+  log(rid, 'info', 'upstream:request', {
+    method: init.method,
+    url: redactURL(upstreamURL).toString(),
+    body_len: request.headers.get('content-length') || '0',
+    headers: reqHeadersObj,
+  }, lvl);
+  
+  // Also log at debug level for consistency
   log(rid, 'debug', 'upstream:request-headers', reqHeadersObj, lvl);
   
   // Log request body if it's not too large and it's JSON
@@ -642,6 +697,12 @@ async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
   const respHeaders = filterResponseHeaders(upstreamResp.headers, { origin });
   const elapsed = Date.now() - start;
   
+  // Prepare headers for logging
+  const respHeadersObj = {};
+  for (const [k, v] of upstreamResp.headers.entries()) {
+    respHeadersObj[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
+  }
+  
   log(rid, 'info', 'upstream:response', {
     status: upstreamResp.status,
     status_text: upstreamResp.statusText || 'OK',
@@ -649,13 +710,10 @@ async function proxyFetch(upstreamURL, request, rid, start, lvl, initOpt) {
     content_length: contentLength,
     sse: isSSE ? 'yes' : 'no',
     elapsed_ms: elapsed,
+    headers: respHeadersObj,
   }, lvl);
   
-  // Log all response headers for debugging
-  const respHeadersObj = {};
-  for (const [k, v] of upstreamResp.headers.entries()) {
-    respHeadersObj[k] = k.toLowerCase() === 'set-cookie' ? 'REDACTED' : v;
-  }
+  // Also log at debug level for consistency
   log(rid, 'debug', 'upstream:response-headers', respHeadersObj, lvl);
   
   // Log filtered response headers that will be sent to client
