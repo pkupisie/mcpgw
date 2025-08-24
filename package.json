@@ -2,7 +2,7 @@
   "name": "mcpgw",
   "version": "1.0.0",
   "description": "",
-  "main": "mcp-sse-mitm.js",
+  "main": "src/worker.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev:cf": "wrangler dev",
@@ -12,9 +12,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^5.1.0",
-    "selfsigned": "^2.4.1",
     "wrangler": "^4.32.0"
   }
 }
