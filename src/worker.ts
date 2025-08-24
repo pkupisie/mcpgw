@@ -57,6 +57,16 @@ interface SessionData {
       };
     };
   };
+  pendingClientAuth?: {
+    client_id: string;
+    redirect_uri: string;
+    scope: string;
+    state: string;
+    code_challenge: string;
+    code_challenge_method: string;
+    resource: string;
+    serverDomain: string;
+  };
 }
 
 interface MCPRouteInfo {
@@ -728,6 +738,26 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
     return new Response('Session expired', { status: 401 });
   }
   
+  // Check if we have upstream tokens for this server
+  const upstreamTokens = session.oauth?.[hostRoute.serverDomain]?.tokens;
+  
+  if (!upstreamTokens) {
+    // Save pending client authorization
+    session.pendingClientAuth = {
+      client_id: formData.get('client_id') as string,
+      redirect_uri: formData.get('redirect_uri') as string,
+      scope: formData.get('scope') as string,
+      state: formData.get('state') as string,
+      code_challenge: formData.get('code_challenge') as string,
+      code_challenge_method: formData.get('code_challenge_method') as string,
+      resource: formData.get('resource') as string,
+      serverDomain: hostRoute.serverDomain
+    };
+    
+    // Redirect to upstream OAuth
+    return initiateUpstreamOAuth(request, hostRoute, session, env);
+  }
+  
   // Store authorization code data globally
   const hostname = new URL(request.url).hostname;
   
@@ -1231,6 +1261,47 @@ async function handleDeviceVerifyPost(request: Request, hostRoute: MCPRouteInfo,
   });
 }
 
+// Initiate upstream OAuth flow
+async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, session: SessionData, env: Env): Promise<Response> {
+  // Discover upstream OAuth endpoints
+  const upstreamOAuth = await discoverUpstreamOAuth(hostRoute.serverDomain);
+  
+  if (!upstreamOAuth) {
+    return new Response('Upstream server does not support OAuth', { status: 400 });
+  }
+  
+  // Generate PKCE parameters for gateway → upstream flow
+  const state = generateRandomString(32);
+  const verifier = generateRandomString(32);
+  const challenge = await sha256Base64Url(verifier);
+  
+  // Store upstream OAuth state in session
+  if (!session.oauth) {
+    session.oauth = {};
+  }
+  if (!session.oauth[hostRoute.serverDomain]) {
+    session.oauth[hostRoute.serverDomain] = {};
+  }
+  
+  session.oauth[hostRoute.serverDomain].state = state;
+  session.oauth[hostRoute.serverDomain].pkceVerifier = verifier;
+  
+  // Build upstream authorization URL
+  const authUrl = new URL(upstreamOAuth.authorization_endpoint);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('client_id', 'mcp-gateway'); // Default client ID for dynamic discovery
+  authUrl.searchParams.set('redirect_uri', `https://${getCurrentDomain(request)}/oauth/callback`);
+  authUrl.searchParams.set('state', `${hostRoute.serverDomain}:${state}`);
+  authUrl.searchParams.set('code_challenge', challenge);
+  authUrl.searchParams.set('code_challenge_method', 'S256');
+  
+  // Set scopes - use first available scope or 'openid' as fallback
+  const scope = upstreamOAuth.scopes_supported?.[0] || 'openid';
+  authUrl.searchParams.set('scope', scope);
+  
+  return Response.redirect(authUrl.toString(), 302);
+}
+
 // Dynamic upstream OAuth discovery
 async function discoverUpstreamOAuth(domain: string): Promise<any | null> {
   try {
@@ -1445,7 +1516,43 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
     delete oauthData.state;
     delete oauthData.pkceVerifier;
     
-    // Redirect to dashboard
+    // Check if we have a pending client authorization to complete
+    if (session.pendingClientAuth) {
+      // Resume the client authorization flow
+      const pendingAuth = session.pendingClientAuth;
+      
+      // Generate authorization code for the client
+      const clientCode = generateRandomString(32);
+      
+      const codeData = {
+        client_id: pendingAuth.client_id,
+        redirect_uri: pendingAuth.redirect_uri,
+        scope: pendingAuth.scope,
+        code_challenge: pendingAuth.code_challenge,
+        code_challenge_method: pendingAuth.code_challenge_method,
+        resource: pendingAuth.resource,
+        domain: getCurrentDomain(request), // Should be the encoded hostname
+        sessionId: sessionId!,
+        expires_at: Date.now() + 600000 // 10 minutes
+      };
+      
+      // Store code globally for cross-session access
+      authorizationCodes.set(clientCode, codeData);
+      
+      // Build redirect URL back to client
+      const clientRedirectUrl = new URL(pendingAuth.redirect_uri);
+      clientRedirectUrl.searchParams.set('code', clientCode);
+      if (pendingAuth.state) {
+        clientRedirectUrl.searchParams.set('state', pendingAuth.state);
+      }
+      
+      // Clear pending authorization
+      delete session.pendingClientAuth;
+      
+      return Response.redirect(clientRedirectUrl.toString(), 302);
+    }
+    
+    // No pending client auth, redirect to dashboard
     return Response.redirect(`https://${getCurrentDomain(request)}/`, 302);
     
   } catch (error) {
