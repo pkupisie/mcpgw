@@ -4,7 +4,7 @@
   "compatibility_date": "2024-08-01",
   "observability": { "enabled": true },
   "vars": {
-    "ALLOW_PROTOCOLS": "https:,wss:"
+    "ALLOW_PROTOCOLS": "https:,wss:",
+    "LOG_LEVEL": "debug"
   }
 }
-

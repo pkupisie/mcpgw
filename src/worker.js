@@ -10,8 +10,21 @@
 
 export default {
   async fetch(request, env, ctx) {
+    const rid = (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2));
+    const start = Date.now();
+    const lvl = logLevel(env);
     try {
       const url = new URL(request.url);
+      log(rid, 'debug', 'request:start', {
+        method: request.method,
+        url: url.toString(),
+        path: url.pathname,
+        search: url.search,
+        ip: request.headers.get('cf-connecting-ip') || null,
+        cf_ray: request.headers.get('cf-ray') || null,
+        ua: request.headers.get('user-agent') || null,
+        headers: redactHeadersObj(headersToObject(request.headers, 64)),
+      }, lvl);
 
       // Health and root info
       if (url.pathname === '/' || url.pathname === '' || url.pathname === '/index.html') {
@@ -25,7 +38,9 @@ export default {
             example: '/aHR0cHM6Ly9tY3AuYXRsYXNzaWFuLmNvbS92MS9zc2U',
           });
         }
-        return landingHTML(url);
+        const resp = landingHTML(url);
+        log(rid, 'debug', 'route:landing', {}, lvl);
+        return resp;
       }
       if (url.pathname === '/encode') {
         const target = url.searchParams.get('url') || '';
@@ -33,13 +48,21 @@ export default {
         let encoded = '';
         try { encoded = toBase64Url(target); } catch (e) { return badRequest('Invalid URL input'); }
         const worker = `${url.origin}/${encoded}`;
-        return json({ original: target, encoded, worker_url: worker });
+        const resp = json({ original: target, encoded, worker_url: worker });
+        log(rid, 'debug', 'route:encode', { target }, lvl);
+        return resp;
       }
       if (url.pathname === '/healthz') return json({ ok: true });
 
       // CORS preflight
       if (request.method === 'OPTIONS') {
-        return corsPreflight(request);
+        const resp = corsPreflight(request);
+        log(rid, 'debug', 'cors:preflight', {
+          origin: request.headers.get('origin') || null,
+          acrh: request.headers.get('access-control-request-headers') || null,
+          acrm: request.headers.get('access-control-request-method') || null,
+        }, lvl);
+        return resp;
       }
 
       // The first segment is the base64url-encoded full upstream URL.
@@ -62,21 +85,42 @@ export default {
         const incoming = new URLSearchParams(url.search);
         for (const [k, v] of incoming.entries()) upstreamURL.searchParams.set(k, v);
       }
+      log(rid, 'debug', 'route:encoded', {
+        encoded,
+        restPath,
+        upstream: upstreamURL.toString(),
+      }, lvl);
 
       // WebSocket tunneling
       const upgrade = request.headers.get('upgrade');
       if (upgrade && upgrade.toLowerCase() === 'websocket') {
-        return await handleWebSocket(request, upstreamURL, env);
+        log(rid, 'info', 'ws:connect', { upstream: upstreamURL.toString() }, lvl);
+        const resp = await handleWebSocket(request, upstreamURL, env);
+        log(rid, 'info', 'ws:accepted', { upstream: upstreamURL.toString() }, lvl);
+        return resp;
       }
 
       // Build upstream request
       const init = await buildUpstreamInit(request, env);
+      log(rid, 'debug', 'upstream:request', {
+        method: init.method,
+        url: upstreamURL.toString(),
+        headers: redactHeadersObj(headersToObject(init.headers, 64)),
+        body_len: request.headers.get('content-length') || null,
+      }, lvl);
       const upstreamResp = await fetch(upstreamURL.toString(), init);
 
       // Pass-through SSE streaming (or any streaming body)
       const contentType = upstreamResp.headers.get('content-type') || '';
       const isSSE = contentType.includes('text/event-stream');
       const respHeaders = filterResponseHeaders(upstreamResp.headers, { forceSSE: isSSE });
+      log(rid, 'debug', 'upstream:response', {
+        status: upstreamResp.status,
+        content_type: contentType || null,
+        sse: isSSE,
+        headers: headersToObject(respHeaders, 64),
+        elapsed_ms: Date.now() - start,
+      }, lvl);
 
       return new Response(upstreamResp.body, {
         status: upstreamResp.status,
@@ -84,7 +128,7 @@ export default {
         headers: respHeaders,
       });
     } catch (err) {
-      console.error('[proxy] error', err);
+      log(rid, 'error', 'proxy:error', { message: String(err?.message || err) }, 'debug');
       return json({ error: 'Proxy error', detail: String(err?.message || err) }, 502);
     }
   }
@@ -268,6 +312,41 @@ function json(obj, status = 200) {
 
 function badRequest(msg) {
   return json({ error: msg }, 400);
+}
+
+// --- Logging helpers ---
+function logLevel(env) {
+  const level = (env?.LOG_LEVEL || 'debug').toLowerCase();
+  const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
+  return order[level] ? level : 'debug';
+}
+function shouldLog(requested, current) {
+  const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
+  return order[requested] >= order[current];
+}
+function log(rid, level, event, data, currentLevel = 'debug') {
+  if (!shouldLog(level, currentLevel)) return;
+  try {
+    console.log(JSON.stringify({ ts: new Date().toISOString(), rid, level, event, ...data }));
+  } catch (e) {
+    console.log(`[log ${level}] ${event} rid=${rid}`);
+  }
+}
+function headersToObject(headers, max = 64) {
+  const out = {};
+  let i = 0;
+  for (const [k, v] of headers.entries()) { out[k] = v; if (++i >= max) break; }
+  return out;
+}
+function redactHeadersObj(obj) {
+  const out = {};
+  for (const k in obj) {
+    const kl = k.toLowerCase();
+    if (kl === 'authorization' || kl === 'proxy-authorization') out[k] = '***';
+    else if (kl === 'cookie' || kl === 'set-cookie') out[k] = '***';
+    else out[k] = obj[k];
+  }
+  return out;
 }
 
 function html(body, status = 200) {
