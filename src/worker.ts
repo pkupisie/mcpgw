@@ -11,25 +11,16 @@
 
 import { base32Encode, base32Decode } from './encoding';
 
-// Types
-interface SessionData {
-  csrf: string;
-  localAuth: boolean;
-}
+// Types (minimal for pure proxy mode)
 
 interface MCPRouteInfo {
   upstreamBase: URL;
   serverDomain: string;
 }
 
-// In-memory session storage (resets on worker restart)
-const sessions = new Map<string, SessionData>();
-
 // Environment bindings
 interface Env {
   DOMAIN_ROOT: string;
-  LOCAL_USER: string;
-  LOCAL_PASSWORD: string;
 }
 
 export default {
@@ -54,10 +45,6 @@ export default {
           return handleDashboard(request, env);
         }
         
-        if (url.pathname === '/login') {
-          if (request.method === 'GET') return handleLoginPage();
-          if (request.method === 'POST') return handleLogin(request, env);
-        }
         
         if (url.pathname === '/encode') {
           return handleEncode(request, env);
@@ -137,14 +124,8 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   return await fetch(upstreamRequest);
 }
 
-// Dashboard
+// Dashboard - public access for URL encoding
 async function handleDashboard(request: Request, env: Env): Promise<Response> {
-  const sessionId = getSessionId(request);
-  const session = sessionId ? await getSession(sessionId, env) : null;
-  
-  if (!session || !session.localAuth) {
-    return Response.redirect(`https://${env.DOMAIN_ROOT}/login`, 302);
-  }
   
   const html = `<!doctype html><html><head><title>MCP Gateway</title></head><body>
     <h1>MCP Proxy Gateway</h1>
@@ -167,54 +148,6 @@ async function handleDashboard(request: Request, env: Env): Promise<Response> {
   });
 }
 
-// Login handlers
-function handleLoginPage(): Response {
-  const html = `<!doctype html><html><body>
-    <h1>MCP Gateway Login</h1>
-    <form method="POST" action="/login">
-      <label>User: <input name="user" required></label><br><br>
-      <label>Pass: <input name="pass" type="password" required></label><br><br>
-      <button type="submit">Sign in</button>
-    </form>
-  </body></html>`;
-  
-  return new Response(html, {
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
-
-async function handleLogin(request: Request, env: Env): Promise<Response> {
-  const formData = await request.formData();
-  const user = formData.get('user') as string;
-  const pass = formData.get('pass') as string;
-  
-  if (user !== env.LOCAL_USER || pass !== env.LOCAL_PASSWORD) {
-    return new Response('Invalid credentials', { status: 401 });
-  }
-  
-  // Create session
-  const sessionId = generateSessionId();
-  const session: SessionData = {
-    csrf: generateRandomString(32),
-    localAuth: true
-  };
-  
-  sessions.set(sessionId, session);
-  
-  // Clean up old sessions periodically (simple memory management)
-  if (sessions.size > 1000) {
-    // Remove oldest sessions when we hit 1000
-    const entries = Array.from(sessions.entries());
-    for (let i = 0; i < 100; i++) {
-      sessions.delete(entries[i][0]);
-    }
-  }
-  
-  const response = Response.redirect(`https://${env.DOMAIN_ROOT}/`, 302);
-  response.headers.set('Set-Cookie', `session=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`);
-  
-  return response;
-}
 
 
 // Encode handler
@@ -249,35 +182,5 @@ function generateEncodedHostname(domain: string, domainRoot: string): string {
   return `${encoded}-enc.${domainRoot}`;
 }
 
-function getSessionId(request: Request): string | null {
-  const cookieHeader = request.headers.get('Cookie');
-  if (!cookieHeader) return null;
-  
-  const cookies: Record<string, string> = {};
-  cookieHeader.split(';').forEach(c => {
-    const [key, ...value] = c.trim().split('=');
-    if (key && value.length > 0) {
-      cookies[key] = value.join('=');
-    }
-  });
-  
-  return cookies.session || null;
-}
-
-async function getSession(sessionId: string, env: Env): Promise<SessionData | null> {
-  return sessions.get(sessionId) || null;
-}
-
-function generateSessionId(): string {
-  return generateRandomString(32);
-}
-
-function generateRandomString(length: number): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let result = '';
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
-}
+// No session management needed for pure proxy mode
 
