@@ -299,6 +299,37 @@ function escapeHtml(unsafe) {
 function landingHTML(url) {
   const origin = url.origin;
   const example = 'https://mcp.atlassian.com/v1/sse';
+  const targetParam = url.searchParams.get('url') || '';
+  let preRendered = '';
+  if (targetParam) {
+    try {
+      // Validate URL
+      const u = new URL(targetParam);
+      const encoded = toBase64Url(u.toString());
+      const worker = origin + '/' + encoded;
+      const curlSse = `curl -N ${worker}`;
+      const curlPost = `curl -s ${worker} -H "content-type: application/json" -d "{}"`;
+      preRendered = `
+        <div class="row grid">
+          <div><div class="muted small">Encoded segment</div><div class="code box" id="enc">${escapeHtml(encoded)}</div></div>
+          <button class="btn" onclick="copy(qs('#enc').textContent)">Copy</button>
+        </div>
+        <div class="row grid">
+          <div><div class="muted small">Worker URL</div><div class="code box" id="worker">${escapeHtml(worker)}</div></div>
+          <button class="btn" onclick="copy(qs('#worker').textContent)">Copy</button>
+        </div>
+        <div class="row">
+          <div class="muted">Quick commands</div>
+          <div class="box small code" style="overflow:auto">
+            <div>$ ${escapeHtml(curlSse)}</div>
+            <div class="muted"># POST example</div>
+            <div>$ ${escapeHtml(curlPost)}</div>
+          </div>
+        </div>
+        <div class="row small muted">Tip: Append extra path or query after the encoded segment, e.g. if you encoded only the origin.</div>
+      `;
+    } catch {}
+  }
   return html(`<!doctype html>
 <html lang="en">
 <head>
@@ -381,10 +412,10 @@ function landingHTML(url) {
       <div class="muted">Origin: <code>${origin}</code></div>
       <div class="row">
         <label for="target">Enter the full upstream MCP URL</label>
-        <input id="target" type="url" placeholder="e.g. ${example}" spellcheck="false" />
+        <input id="target" type="url" placeholder="e.g. ${example}" value="${escapeHtml(targetParam)}" spellcheck="false" />
         <div class="small muted">Only TLS upstreams are allowed by default (https:, wss:).</div>
       </div>
-      <div id="out" class="row"></div>
+      <div id="out" class="row">${preRendered}</div>
       <div class="row small muted">API: <code>GET ${origin}/encode?url=&lt;full-url&gt;</code> returns JSON.</div>
     </div>
   </body>
