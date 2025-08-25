@@ -248,18 +248,20 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   const hostname = url.hostname;
   
   // Log ALL incoming requests for debugging
-  console.log(`\n=== MCP Request ===`);
-  console.log(`URL: ${request.method} ${url.pathname}`);
-  console.log(`Host: ${hostname}`);
+  console.log(`\n╔══ DOWNSTREAM REQUEST (Claude → Gateway) ══════════`);
+  console.log(`║ URL: ${request.method} ${url.pathname}`);
+  console.log(`║ Host: ${hostname}`);
+  console.log(`║ Target Server: ${hostRoute.serverDomain}`);
   
   // Check if this is an MCP client trying to connect
   const mcpProtocolVersion = request.headers.get('mcp-protocol-version');
   const userAgent = request.headers.get('user-agent');
   const authHeader = request.headers.get('Authorization');
   
-  console.log(`MCP Protocol: ${mcpProtocolVersion || 'not sent'}`);
-  console.log(`User-Agent: ${userAgent || 'not sent'}`);
-  console.log(`Authorization: ${authHeader ? `Bearer ${authHeader.slice(7, 20)}...` : 'none'}`);
+  console.log(`║ MCP Protocol: ${mcpProtocolVersion || 'not sent'}`);
+  console.log(`║ User-Agent: ${userAgent || 'not sent'}`);
+  console.log(`║ Authorization: ${authHeader ? `Bearer ${authHeader.slice(7, 20)}...` : 'none'}`);
+  console.log(`╚════════════════════════════════════════════════════`);
   
   // If it's an MCP client without auth, check if it's accessing public endpoints
   if (mcpProtocolVersion && (!authHeader || !authHeader.startsWith('Bearer '))) {
@@ -301,10 +303,14 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
         'WWW-Authenticate': wwwAuthHeader
       };
       
-      console.log(`Sending 401 response for ${url.pathname}:`);
-      console.log(`  Status: 401`);
-      console.log(`  Headers:`, responseHeaders);
-      console.log(`  Body:`, responseBody);
+      console.log(`\n╔══ DOWNSTREAM RESPONSE (Gateway → Claude) ═════════`);
+      console.log(`║ Status: 401 Unauthorized`);
+      console.log(`║ Path: ${url.pathname}`);
+      console.log(`║ Headers:`);
+      console.log(`║   Content-Type: ${responseHeaders['Content-Type']}`);
+      console.log(`║   WWW-Authenticate: ${responseHeaders['WWW-Authenticate']}`);
+      console.log(`║ Body: ${responseBody}`);
+      console.log(`╚════════════════════════════════════════════════════`);
       
       return new Response(responseBody, { 
         status: 401,
@@ -318,10 +324,12 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const url = new URL(request.url);
     
-    console.log(`Authenticated request detected for ${url.pathname}`);
-    console.log(`  Method: ${request.method}`);
-    console.log(`  MCP Protocol: ${mcpProtocolVersion || 'not sent'}`);
-    console.log(`  Auth header: Bearer ${authHeader.slice(7, 20)}...`);
+    console.log(`\n╔══ AUTHENTICATED DOWNSTREAM REQUEST ════════════════`);
+    console.log(`║ Path: ${url.pathname}`);
+    console.log(`║ Method: ${request.method}`);
+    console.log(`║ MCP Protocol: ${mcpProtocolVersion || 'NOT SENT (possible issue)'}`);
+    console.log(`║ Bearer Token: ${authHeader.slice(7, 20)}...`);
+    console.log(`╚════════════════════════════════════════════════════`);
     
     if (url.pathname === '/sse') {
       // HEAD request for SSE discovery
@@ -475,12 +483,16 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
   if (useUpstreamAuth && serverData?.tokens) {
     // Proactively refresh token if it's expired or about to expire (within 5 minutes)
     if (isTokenExpired(serverData.expiresAt, 300)) {
-      console.log(`Token expired or expiring soon for ${hostRoute.serverDomain}, attempting refresh...`);
+      console.log(`\n╔══ UPSTREAM TOKEN REFRESH ══════════════════════════`);
+      console.log(`║ Server: ${hostRoute.serverDomain}`);
+      console.log(`║ Reason: Token expired or expiring within 5 minutes`);
       const refreshed = await refreshUpstreamToken(hostRoute.serverDomain, serverData, env);
       if (!refreshed) {
-        console.error(`Failed to refresh token for ${hostRoute.serverDomain}`);
-        // Continue with expired token, will get 401 and retry
+        console.error(`║ Result: FAILED - continuing with expired token`);
+      } else {
+        console.log(`║ Result: SUCCESS - new token acquired`);
       }
+      console.log(`╚════════════════════════════════════════════════════`);
     }
     upstreamHeaders['Authorization'] = `Bearer ${serverData.tokens.access_token}`;
   }
@@ -498,18 +510,31 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
     body: request.body,
   });
   
-  // Forward request
-  console.log(`Forwarding MCP request to ${upstreamUrl.toString()}`);
-  console.log(`Auth header: ${upstreamHeaders['Authorization'] ? 'Bearer token present' : 'No auth'}`);
-  console.log(`Request method: ${request.method}`);
+  // Forward request to upstream
+  console.log(`\n╔══ UPSTREAM REQUEST (Gateway → ${hostRoute.serverDomain}) ══`);
+  console.log(`║ URL: ${request.method} ${upstreamUrl.toString()}`);
+  console.log(`║ Auth: ${upstreamHeaders['Authorization'] ? `Bearer ${upstreamHeaders['Authorization'].slice(7, 20)}...` : 'No auth (bypass mode)'}`);
+  console.log(`║ Headers sent: ${Object.keys(upstreamHeaders).join(', ')}`);
+  console.log(`╚════════════════════════════════════════════════════`);
   
   const response = await fetch(upstreamRequest);
-  console.log(`Upstream response status: ${response.status}`);
+  
+  console.log(`\n╔══ UPSTREAM RESPONSE ═══════════════════════════════`);
+  console.log(`║ Status: ${response.status} ${response.statusText}`);
+  console.log(`║ Headers: ${Array.from(response.headers.keys()).join(', ')}`);
+  if (response.status === 401) {
+    const wwwAuth = response.headers.get('WWW-Authenticate');
+    console.log(`║ WWW-Authenticate: ${wwwAuth || 'not present'}`);
+  }
+  console.log(`╚════════════════════════════════════════════════════`);
   
   // Handle token refresh on 401
-  if (response.status === 401 && serverData.tokens.refresh_token) {
+  if (response.status === 401 && serverData?.tokens?.refresh_token) {
+    console.log(`\n╔══ UPSTREAM 401 - ATTEMPTING TOKEN REFRESH ════════`);
+    console.log(`║ Server: ${hostRoute.serverDomain}`);
     const refreshed = await refreshUpstreamToken(hostRoute.serverDomain, serverData, env);
     if (refreshed) {
+      console.log(`║ Refresh: SUCCESS - retrying request`);
       // Retry with new token
       upstreamHeaders['Authorization'] = `Bearer ${serverData.tokens.access_token}`;
       const retryRequest = new Request(upstreamUrl.toString(), {
@@ -517,7 +542,13 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
         headers: upstreamHeaders,
         body: request.body,
       });
-      return await fetch(retryRequest);
+      const retryResponse = await fetch(retryRequest);
+      console.log(`║ Retry Status: ${retryResponse.status} ${retryResponse.statusText}`);
+      console.log(`╚════════════════════════════════════════════════════`);
+      return retryResponse;
+    } else {
+      console.log(`║ Refresh: FAILED - returning 401 to client`);
+      console.log(`╚════════════════════════════════════════════════════`);
     }
   }
   
@@ -737,7 +768,10 @@ async function handleProtectedResourceMetadata(request: Request, hostRoute: MCPR
 
 // MCP SSE Handler
 async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
-  console.log(`Setting up MCP SSE stream for ${hostRoute.serverDomain}`);
+  console.log(`\n╔══ SSE STREAM ESTABLISHED ══════════════════════════════`);
+  console.log(`║ Downstream: Claude → Gateway (authenticated)`);
+  console.log(`║ Upstream: Gateway → ${hostRoute.serverDomain}`);
+  console.log(`╚══════════════════════════════════════════════════════`);
   
   // Create a TransformStream for SSE
   const { readable, writable } = new TransformStream();
@@ -1022,7 +1056,8 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
   const formData = await request.formData();
   const grant_type = formData.get('grant_type');
   
-  console.log(`OAuth token request - grant_type: ${grant_type}`);
+  console.log(`\n╔══ DOWNSTREAM OAUTH TOKEN EXCHANGE (Claude → Gateway) ══`);
+  console.log(`║ Grant Type: ${grant_type}`);
   
   if (grant_type === 'authorization_code') {
     const code = formData.get('code') as string;
@@ -1030,7 +1065,9 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     const redirect_uri = formData.get('redirect_uri') as string;
     const code_verifier = formData.get('code_verifier') as string;
     
-    console.log(`Token request params - code: ${code?.substring(0, 8)}..., client_id: ${client_id}, redirect_uri: ${redirect_uri}`);
+    console.log(`║ Code: ${code?.substring(0, 8)}...`);
+    console.log(`║ Client ID: ${client_id}`);
+    console.log(`║ Redirect URI: ${redirect_uri}`);
     
     // Look up code in KV store
     const codeDataStr = await env.OAUTH_CODES.get(code);
@@ -1099,7 +1136,8 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       scope: codeData.scope
     };
     
-    console.log(`Sending token response to Claude:`, JSON.stringify(tokenResponse, null, 2));
+    console.log(`║ Token Response:`, JSON.stringify(tokenResponse, null, 2));
+    console.log(`╚══════════════════════════════════════════════════════`);
     
     return new Response(JSON.stringify(tokenResponse), {
       headers: { 
@@ -1669,7 +1707,11 @@ async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const serverDomain = url.searchParams.get('server');
   
+  console.log(`\n╔══ UPSTREAM OAUTH START (Gateway → ${serverDomain}) ══`);
+  
   if (!serverDomain) {
+    console.log(`║ Error: Missing server parameter`);
+    console.log(`╚══════════════════════════════════════════════════════`);
     return new Response('Missing server parameter', { status: 400 });
   }
   
