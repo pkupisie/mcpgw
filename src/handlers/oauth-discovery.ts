@@ -43,9 +43,14 @@ export async function handleOAuthDiscovery(request: Request, hostRoute: MCPRoute
   console.log(`╚══════════════════════════════════════════════════════`);
   
   return new Response(JSON.stringify(metadata), {
+    status: 200,
     headers: {
       'Content-Type': 'application/json',
-      'Cache-Control': 'public, max-age=3600'
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Vary': 'Origin',
+      'Cache-Control': 'public, max-age=300'
     }
   });
 }
@@ -57,8 +62,8 @@ export async function handleProtectedResourceMetadata(request: Request, hostRout
   const metadata = {
     resource,
     authorization_servers: [`https://${currentDomain}`],
-    scopes_supported: ['mcp', 'read', 'write'],
     bearer_methods_supported: ['authorization_header'],
+    scopes_supported: ['mcp', 'read', 'write'],
     sse_endpoint: '/sse',
     resource_documentation: `https://${currentDomain}`,
     
@@ -79,12 +84,18 @@ export async function handleProtectedResourceMetadata(request: Request, hostRout
   console.log(`║ Resource: ${resource}`);
   console.log(`║ Auth Server: ${metadata.authorization_servers[0]}`);
   console.log(`║ Bearer Methods: ${metadata.bearer_methods_supported.join(', ')}`);
+  console.log(`║ SSE Endpoint: ${metadata.sse_endpoint}`);
   console.log(`╚══════════════════════════════════════════════════════`);
   
   return new Response(JSON.stringify(metadata), {
+    status: 200,
     headers: {
       'Content-Type': 'application/json',
-      'Cache-Control': 'public, max-age=3600'
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Vary': 'Origin',
+      'Cache-Control': 'public, max-age=300'
     }
   });
 }

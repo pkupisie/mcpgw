@@ -29,26 +29,34 @@ export default {
       const hostRoute = parseHostEncodedUpstream(url.hostname, env.DOMAIN_ROOT);
       
       if (hostRoute) {
-        // Handle CORS preflight requests
+        // Handle CORS preflight requests for all paths
         if (request.method === 'OPTIONS') {
           return new Response(null, {
+            status: 204,
             headers: {
               'Access-Control-Allow-Origin': '*',
               'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
               'Access-Control-Allow-Headers': 'Content-Type, Authorization, MCP-Protocol-Version',
-              'Access-Control-Max-Age': '86400'
+              'Access-Control-Max-Age': '86400',
+              'Vary': 'Origin'
             }
           });
         }
         
-        // Handle all .well-known paths liberally
+        // Handle all .well-known paths - these MUST be public (no auth)
+        if (url.pathname === '/.well-known/openid-configuration' || 
+            url.pathname.startsWith('/.well-known/openid-configuration/')) {
+          // OIDC discovery - same as OAuth but with OIDC naming
+          return handleOAuthDiscovery(request, hostRoute, env);
+        }
+        
         if (url.pathname.startsWith('/.well-known/oauth-authorization-server')) {
-          // Return OAuth discovery for any path under this prefix
+          // OAuth 2.0 Authorization Server Metadata (RFC 8414)
           return handleOAuthDiscovery(request, hostRoute, env);
         }
         
         if (url.pathname.startsWith('/.well-known/oauth-protected-resource')) {
-          // Return protected resource metadata for any path under this prefix
+          // OAuth 2.0 Protected Resource Metadata
           return handleProtectedResourceMetadata(request, hostRoute, env);
         }
         
