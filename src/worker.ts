@@ -136,17 +136,14 @@ export default {
           });
         }
         
-        // Check if this is a local OAuth request
-        if (url.pathname === '/.well-known/oauth-authorization-server') {
+        // Handle all .well-known paths liberally
+        if (url.pathname.startsWith('/.well-known/oauth-authorization-server')) {
+          // Return OAuth discovery for any path under this prefix
           return handleOAuthDiscovery(request, hostRoute, env);
         }
         
-        if (url.pathname === '/.well-known/oauth-authorization-server/sse') {
-          return handleOAuthDiscovery(request, hostRoute, env);
-        }
-        
-        if (url.pathname === '/.well-known/oauth-protected-resource' || 
-            url.pathname === '/.well-known/oauth-protected-resource/sse') {
+        if (url.pathname.startsWith('/.well-known/oauth-protected-resource')) {
+          // Return protected resource metadata for any path under this prefix
           return handleProtectedResourceMetadata(request, hostRoute, env);
         }
         
@@ -673,9 +670,10 @@ async function handleProtectedResourceMetadata(request: Request, hostRoute: MCPR
   
   const metadata = {
     resource: `https://${hostname}`,
-    authorization_servers: [`https://${hostname}/.well-known/oauth-authorization-server`],
+    authorization_servers: [`https://${hostname}`],
     scopes_supported: ['mcp', 'read', 'write'],
-    bearer_methods_supported: ['header', 'query'],
+    bearer_methods_supported: ['authorization_header'],
+    sse_endpoint: '/sse',
     resource_documentation: `https://${hostname}`,
     
     // Explicitly indicate that authentication is required
@@ -1065,11 +1063,6 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       expires_in,
       scope: codeData.scope
     };
-    
-    // Include resource parameter in response if provided (RFC 8707)
-    if (codeData.resource) {
-      tokenResponse.resource = codeData.resource;
-    }
     
     console.log(`Sending token response to Claude:`, JSON.stringify(tokenResponse, null, 2));
     
