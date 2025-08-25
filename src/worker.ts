@@ -258,10 +258,20 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
     
     const url = new URL(request.url);
     
-    // Allow unauthenticated access to OAuth discovery and flow endpoints
-    if (url.pathname.startsWith('/.well-known/') || url.pathname.startsWith('/oauth/')) {
-      console.log(`Allowing unauthenticated access to public endpoint: ${url.pathname}`);
-      // Continue to normal handling - these should be handled above this point
+    // Handle .well-known and OAuth endpoints without authentication
+    if (url.pathname.startsWith('/.well-known/oauth-authorization-server')) {
+      console.log(`Serving OAuth discovery for: ${url.pathname}`);
+      return handleOAuthDiscovery(request, hostRoute, env);
+    }
+    
+    if (url.pathname.startsWith('/.well-known/oauth-protected-resource')) {
+      console.log(`Serving protected resource metadata for: ${url.pathname}`);
+      return handleProtectedResourceMetadata(request, hostRoute, env);
+    }
+    
+    if (url.pathname.startsWith('/oauth/')) {
+      console.log(`Allowing unauthenticated access to OAuth endpoint: ${url.pathname}`);
+      // OAuth endpoints are handled elsewhere, let them through
     } else {
       // Require authentication for ALL MCP data endpoints including SSE
       console.log(`Requiring authentication for MCP endpoint: ${url.pathname}`);
