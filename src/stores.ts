@@ -17,5 +17,9 @@ export const authorizationCodes = new Map<string, AuthorizationCode>();
 // Global access token store
 export const accessTokens = new Map<string, AccessToken>();
 
+// Device flow stores
+export const deviceCodes = new Map<string, any>();
+export const userCodeMap = new Map<string, string>();
+
 // Request correlation tracking
 export const requestCorrelation = new Map<string, string>();

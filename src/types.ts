@@ -75,20 +75,22 @@ export interface AuthorizationCode {
   client_id: string;
   redirect_uri: string;
   scope: string;
-  code_challenge: string;
-  code_challenge_method: string;
-  resource: string;
-  domain: string;
+  code_challenge?: string;
+  code_challenge_method?: string;
+  resource?: string;
+  serverDomain: string;
+  hostname: string;
   sessionId: string;
-  expires_at: number;
+  created_at: number;
 }
 
 export interface AccessToken {
   client_id: string;
   sessionId: string;
-  domain: string;
-  expires_at: number;
-  scope: string;
+  serverDomain: string;
+  hostname: string;
+  scope?: string;
+  created_at: number;
 }
 
 export interface Env {

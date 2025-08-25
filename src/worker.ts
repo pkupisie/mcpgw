@@ -16,13 +16,8 @@ import { handleLoginPage, handleLogin } from './handlers/auth';
 import { handleOAuthDiscovery, handleProtectedResourceMetadata } from './handlers/oauth-discovery';
 import { handleOAuthStart, handleOAuthCallback } from './handlers/oauth-upstream';
 import { handleEncode } from './handlers/utility';
-
-// Import remaining handlers from the existing worker file
-// These will be gradually moved to individual modules
-import {
-  handleLocalOAuth,
-  handleMCPRequest
-} from './worker-handlers';
+import { handleLocalOAuth } from './handlers/oauth-local';
+import { handleMCPRequest } from './handlers/mcp';
 
 // Export the worker
 export default {

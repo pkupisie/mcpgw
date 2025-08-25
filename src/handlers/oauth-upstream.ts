@@ -2,7 +2,7 @@
  * Upstream OAuth handlers for MCP OAuth Gateway
  */
 
-import type { Env, MCPServerConfig, SessionData } from '../types';
+import type { Env, MCPServerConfig, MCPRouteInfo, SessionData } from '../types';
 import { sessions } from '../stores';
 import { getSessionId, getSession } from '../utils/session';
 import { generateRandomString, sha256Base64Url } from '../utils/crypto';
@@ -173,71 +173,52 @@ export async function handleOAuthCallback(request: Request, env: Env): Promise<R
   return Response.redirect(`https://${getCurrentDomain(request)}${redirectTo}`, 302);
 }
 
-export async function refreshUpstreamToken(serverDomain: string, serverData: any, env: Env): Promise<boolean> {
-  if (!serverData.tokens?.refresh_token) {
-    console.error('No refresh token available');
-    return false;
-  }
-  
+export async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, session: SessionData, env: Env): Promise<Response> {
   // Parse MCP servers config
   let mcpServers: MCPServerConfig[] = [];
   try {
     mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
   } catch (e) {
     console.error('Failed to parse MCP_SERVERS:', e);
-    return false;
+    return new Response('Server configuration error', { status: 500 });
   }
   
-  const serverConfig = mcpServers.find(s => s.domain === serverDomain);
+  const serverConfig = mcpServers.find(s => s.domain === hostRoute.serverDomain);
   
   if (!serverConfig) {
-    console.error(`No config found for server: ${serverDomain}`);
-    return false;
+    console.error(`No config found for server: ${hostRoute.serverDomain}`);
+    return new Response('Unknown MCP server', { status: 404 });
   }
   
-  const tokenUrl = new URL(serverConfig.tokenEndpoint);
-  const tokenBody = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: serverData.tokens.refresh_token,
-    client_id: serverConfig.clientId
-  });
+  // Generate OAuth state and PKCE
+  const state = generateRandomString(32);
+  const pkceVerifier = generateRandomString(64);
+  const pkceChallenge = await sha256Base64Url(pkceVerifier);
   
-  if (serverConfig.clientSecret) {
-    tokenBody.set('client_secret', serverConfig.clientSecret);
-  }
+  // Store OAuth state in session
+  if (!session.oauth) session.oauth = {};
+  session.oauth[hostRoute.serverDomain] = {
+    state,
+    pkceVerifier
+  };
   
-  try {
-    const tokenResponse = await fetch(tokenUrl.toString(), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'application/json'
-      },
-      body: tokenBody.toString()
-    });
-    
-    if (!tokenResponse.ok) {
-      const errorText = await tokenResponse.text();
-      console.error(`Token refresh failed: ${errorText}`);
-      return false;
-    }
-    
-    const tokens = await tokenResponse.json() as any;
-    
-    // Update tokens
-    serverData.tokens.access_token = tokens.access_token;
-    if (tokens.refresh_token) {
-      serverData.tokens.refresh_token = tokens.refresh_token;
-    }
-    if (tokens.expires_in) {
-      serverData.tokens.expires_in = tokens.expires_in;
-      serverData.expiresAt = Date.now() + (tokens.expires_in * 1000);
-    }
-    
-    console.log(`Successfully refreshed token for ${serverDomain}`);
-    return true;
-  } catch (error) {
-    console.error(`Failed to refresh token: ${error}`);
-    return false;
-  }
+  // Build authorization URL
+  const authUrl = new URL(serverConfig.authzEndpoint);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('client_id', serverConfig.clientId);
+  authUrl.searchParams.set('redirect_uri', `https://${getCurrentDomain(request)}/oauth/callback`);
+  authUrl.searchParams.set('state', state);
+  authUrl.searchParams.set('scope', serverConfig.scopes);
+  authUrl.searchParams.set('code_challenge', pkceChallenge);
+  authUrl.searchParams.set('code_challenge_method', 'S256');
+  
+  console.log(`\n╔══ INITIATING UPSTREAM OAUTH ════════════════════════`);
+  console.log(`║ Server: ${hostRoute.serverDomain}`);
+  console.log(`║ Client ID: ${serverConfig.clientId}`);
+  console.log(`║ Scopes: ${serverConfig.scopes}`);
+  console.log(`║ Auth URL: ${authUrl.toString()}`);
+  console.log(`╚══════════════════════════════════════════════════════`);
+  
+  return Response.redirect(authUrl.toString(), 302);
 }
+

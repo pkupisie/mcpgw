@@ -54,6 +54,9 @@ export async function handleLogin(request: Request, env: Env): Promise<Response>
   
   sessions.set(sessionId, session);
   
+  console.log(`║ Session Created: ${sessionId.substring(0, 8)}...`);
+  console.log(`║ Total Sessions: ${sessions.size}`);
+  
   // Clean up old sessions periodically (simple memory management)
   if (sessions.size > 1000) {
     // Remove oldest sessions when we hit 1000
