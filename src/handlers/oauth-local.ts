@@ -3,7 +3,7 @@
  */
 
 import type { Env, MCPRouteInfo, SessionData } from '../types';
-import { sessions, authorizationCodes, accessTokens, deviceCodes, userCodeMap } from '../stores';
+import { sessions, authorizationCodes, accessTokens, refreshTokens, deviceCodes, userCodeMap } from '../stores';
 import { getSessionId, getSession, generateSessionId, createDeviceSession, generateUserCode, saveSession } from '../utils/session';
 import { generateRandomString, sha256Base64Url } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';
@@ -275,7 +275,11 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
         console.log(`╚══════════════════════════════════════════════════════`);
         return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Authorization code expired or not found' }), {
           status: 400,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+            ...corsFor(origin)
+          }
         });
       }
       codeData = JSON.parse(codeDataStr);
@@ -287,7 +291,11 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
         console.log(`╚══════════════════════════════════════════════════════`);
         return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Authorization code expired or not found' }), {
           status: 400,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+            ...corsFor(origin)
+          }
         });
       }
       authorizationCodes.delete(code);
@@ -299,7 +307,11 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       console.log(`╚══════════════════════════════════════════════════════`);
       return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid authorization code parameters' }), {
         status: 400,
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          ...corsFor(origin)
+        }
       });
     }
     
@@ -310,7 +322,11 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
         console.log(`╚══════════════════════════════════════════════════════`);
         return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'PKCE verification failed' }), {
           status: 400,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+            ...corsFor(origin)
+          }
         });
       }
       
@@ -320,7 +336,11 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
         console.log(`╚══════════════════════════════════════════════════════`);
         return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'PKCE verification failed' }), {
           status: 400,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+            ...corsFor(origin)
+          }
         });
       }
     }
@@ -329,7 +349,7 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     const access_token = generateRandomString(40);
     const refresh_token = generateRandomString(40);
     
-    // Store token globally
+    // Store access token globally
     accessTokens.set(access_token, {
       client_id,
       sessionId: codeData.sessionId,
@@ -337,6 +357,17 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       hostname: codeData.hostname,
       scope: codeData.scope,
       created_at: Date.now()
+    });
+    
+    // Store refresh token globally
+    refreshTokens.set(refresh_token, {
+      client_id,
+      sessionId: codeData.sessionId,
+      serverDomain: codeData.serverDomain,
+      hostname: codeData.hostname,
+      scope: codeData.scope,
+      created_at: Date.now(),
+      access_token
     });
     
     const tokenResponse = {
@@ -361,6 +392,142 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     });
   }
   
+  if (grant_type === 'refresh_token') {
+    const refresh_token = formData.get('refresh_token') as string;
+    const client_id = formData.get('client_id') as string;
+    const scope = formData.get('scope') as string;  // Optional - if omitted, use original scope
+    
+    console.log(`║ Refresh Token: ${refresh_token?.substring(0, 8)}...`);
+    console.log(`║ Client ID: ${client_id}`);
+    
+    if (!refresh_token) {
+      console.log(`║ Result: FAILED - Missing refresh_token`);
+      console.log(`╚══════════════════════════════════════════════════════`);
+      return new Response(JSON.stringify({ 
+        error: 'invalid_request', 
+        error_description: 'missing refresh_token' 
+      }), {
+        status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          ...corsFor(origin)
+        }
+      });
+    }
+    
+    // Look up refresh token
+    const refreshTokenData = refreshTokens.get(refresh_token);
+    if (!refreshTokenData) {
+      console.log(`║ Result: FAILED - Invalid refresh token`);
+      console.log(`╚══════════════════════════════════════════════════════`);
+      return new Response(JSON.stringify({ 
+        error: 'invalid_grant', 
+        error_description: 'Invalid or expired refresh token' 
+      }), {
+        status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          ...corsFor(origin)
+        }
+      });
+    }
+    
+    // Validate client_id if provided
+    if (client_id && refreshTokenData.client_id !== client_id) {
+      console.log(`║ Result: FAILED - Client ID mismatch`);
+      console.log(`╚══════════════════════════════════════════════════════`);
+      return new Response(JSON.stringify({ 
+        error: 'invalid_grant', 
+        error_description: 'Client ID mismatch' 
+      }), {
+        status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          ...corsFor(origin)
+        }
+      });
+    }
+    
+    // Check if refresh token is expired (30 days)
+    const refreshTokenAge = Date.now() - refreshTokenData.created_at;
+    if (refreshTokenAge > 30 * 24 * 60 * 60 * 1000) {
+      refreshTokens.delete(refresh_token);
+      console.log(`║ Result: FAILED - Refresh token expired`);
+      console.log(`╚══════════════════════════════════════════════════════`);
+      return new Response(JSON.stringify({ 
+        error: 'invalid_grant', 
+        error_description: 'Refresh token expired' 
+      }), {
+        status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          ...corsFor(origin)
+        }
+      });
+    }
+    
+    // Delete old access token if it exists
+    if (refreshTokenData.access_token) {
+      accessTokens.delete(refreshTokenData.access_token);
+    }
+    
+    // Generate new access token
+    const new_access_token = generateRandomString(40);
+    
+    // Generate new refresh token (rotation for better security)
+    const new_refresh_token = generateRandomString(40);
+    
+    // Store new access token
+    accessTokens.set(new_access_token, {
+      client_id: refreshTokenData.client_id,
+      sessionId: refreshTokenData.sessionId,
+      serverDomain: refreshTokenData.serverDomain,
+      hostname: refreshTokenData.hostname,
+      scope: scope || refreshTokenData.scope,  // Use provided scope or original
+      created_at: Date.now()
+    });
+    
+    // Delete old refresh token
+    refreshTokens.delete(refresh_token);
+    
+    // Store new refresh token
+    refreshTokens.set(new_refresh_token, {
+      client_id: refreshTokenData.client_id,
+      sessionId: refreshTokenData.sessionId,
+      serverDomain: refreshTokenData.serverDomain,
+      hostname: refreshTokenData.hostname,
+      scope: scope || refreshTokenData.scope,
+      created_at: Date.now(),
+      access_token: new_access_token
+    });
+    
+    const tokenResponse = {
+      access_token: new_access_token,
+      token_type: 'Bearer',
+      expires_in: 3600,
+      refresh_token: new_refresh_token,
+      scope: scope || refreshTokenData.scope || 'mcp read write'
+    };
+    
+    console.log(`║ Result: SUCCESS`);
+    console.log(`║ New Access Token: ${new_access_token.substring(0, 8)}...`);
+    console.log(`║ New Refresh Token: ${new_refresh_token.substring(0, 8)}...`);
+    console.log(`║ Scope: ${tokenResponse.scope}`);
+    console.log(`╚══════════════════════════════════════════════════════`);
+    
+    return new Response(JSON.stringify(tokenResponse), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        ...corsFor(origin)
+      }
+    });
+  }
+  
   if (grant_type === 'urn:ietf:params:oauth:grant-type:device_code') {
     const device_code = formData.get('device_code') as string;
     const client_id = formData.get('client_id') as string;
@@ -369,20 +536,49 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     if (!deviceData) {
       return new Response(JSON.stringify({ error: 'expired_token' }), {
         status: 400,
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          ...corsFor(origin)
+        }
       });
     }
     
     if (!deviceData.authorized) {
       return new Response(JSON.stringify({ error: 'authorization_pending' }), {
         status: 400,
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          ...corsFor(origin)
+        }
       });
     }
     
     // Generate tokens
     const access_token = generateRandomString(40);
     const refresh_token = generateRandomString(40);
+    
+    // Store access token
+    accessTokens.set(access_token, {
+      client_id: deviceData.client_id,
+      sessionId: '', // Device flow doesn't use sessionId
+      serverDomain: hostRoute.serverDomain,
+      hostname: new URL(request.url).hostname,
+      scope: deviceData.scope || 'mcp',
+      created_at: Date.now()
+    });
+    
+    // Store refresh token
+    refreshTokens.set(refresh_token, {
+      client_id: deviceData.client_id,
+      sessionId: '', // Device flow doesn't use sessionId
+      serverDomain: hostRoute.serverDomain,
+      hostname: new URL(request.url).hostname,
+      scope: deviceData.scope || 'mcp',
+      created_at: Date.now(),
+      access_token
+    });
     
     deviceCodes.delete(device_code);
     
@@ -391,16 +587,27 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       token_type: 'Bearer',
       expires_in: 3600,
       refresh_token,
-      scope: 'mcp'
+      scope: deviceData.scope || 'mcp'
     }), {
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        ...corsFor(origin)
+      }
     });
   }
   
-  return new Response(JSON.stringify({ error: 'unsupported_grant_type' }), {
+  console.log(`║ Result: FAILED - Unsupported grant type: ${grant_type}`);
+  console.log(`╚══════════════════════════════════════════════════════`);
+  
+  return new Response(JSON.stringify({ 
+    error: 'unsupported_grant_type',
+    error_description: 'Only authorization_code and refresh_token grants are supported'
+  }), {
     status: 400,
     headers: {
       'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
       ...corsFor(origin)
     }
   });
@@ -442,7 +649,10 @@ async function handleLocalOAuthDevice(request: Request, hostRoute: MCPRouteInfo,
     expires_in: 900,
     interval: 5
   }), {
-    headers: { 'Content-Type': 'application/json' }
+    headers: { 
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store'
+    }
   });
 }
 
@@ -465,7 +675,10 @@ async function handleLocalOAuthIntrospect(request: Request, hostRoute: MCPRouteI
   
   if (!tokenData) {
     return new Response(JSON.stringify({ active: false }), {
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store'
+      }
     });
   }
   
@@ -475,7 +688,10 @@ async function handleLocalOAuthIntrospect(request: Request, hostRoute: MCPRouteI
   if (isExpired) {
     accessTokens.delete(token);
     return new Response(JSON.stringify({ active: false }), {
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store'
+      }
     });
   }
   
@@ -486,7 +702,10 @@ async function handleLocalOAuthIntrospect(request: Request, hostRoute: MCPRouteI
     token_type: 'Bearer',
     exp: Math.floor((tokenData.created_at + 3600000) / 1000)
   }), {
-    headers: { 'Content-Type': 'application/json' }
+    headers: { 
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store'
+    }
   });
 }
 

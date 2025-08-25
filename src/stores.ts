@@ -3,7 +3,7 @@
  * These are in-memory stores that reset on worker restart
  */
 
-import type { SessionData, RegisteredClient, AuthorizationCode, AccessToken } from './types';
+import type { SessionData, RegisteredClient, AuthorizationCode, AccessToken, RefreshToken } from './types';
 
 // In-memory session storage (resets on worker restart)
 export const sessions = new Map<string, SessionData>();
@@ -16,6 +16,9 @@ export const authorizationCodes = new Map<string, AuthorizationCode>();
 
 // Global access token store
 export const accessTokens = new Map<string, AccessToken>();
+
+// Global refresh token store
+export const refreshTokens = new Map<string, RefreshToken>();
 
 // Device flow stores
 export const deviceCodes = new Map<string, any>();

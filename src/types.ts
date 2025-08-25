@@ -95,6 +95,16 @@ export interface AccessToken {
   created_at: number;
 }
 
+export interface RefreshToken {
+  client_id: string;
+  sessionId: string;
+  serverDomain: string;
+  hostname: string;
+  scope?: string;
+  created_at: number;
+  access_token?: string;  // Track associated access token for rotation
+}
+
 export interface Env {
   DOMAIN_ROOT: string;
   LOCAL_USER: string;
