@@ -143,8 +143,10 @@ export async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRout
   const redirectUri = `https://${getCurrentDomain(request)}/oauth/callback`;
   
   // Try to discover OAuth configuration from upstream server
-  console.log(`\n╔══ DISCOVERING OAUTH CONFIG ═════════════════════════`);
-  console.log(`║ Server: ${hostRoute.serverDomain}`);
+  console.log(`\n╔══ INITIATING UPSTREAM OAUTH ═════════════════════════`);
+  console.log(`║ Target Server: ${hostRoute.serverDomain}`);
+  console.log(`║ Request Path: ${new URL(request.url).pathname}`);
+  console.log(`║ Discovering OAuth configuration...`);
   
   const oauthConfig = await discoverOAuthConfig(hostRoute.serverDomain);
   
