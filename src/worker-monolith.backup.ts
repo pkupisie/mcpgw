@@ -1085,6 +1085,16 @@ export async function handleLocalOAuthAuthorizePost(request: Request, hostRoute:
     req_id_from_probe: requestCorrelation.get(hostname) || undefined // Correlate with original SSE probe
   };
   
+  const state = formData.get('state') as string;
+  
+  console.log(`\n╔══ AUTHORIZATION CODE ISSUED ═══════════════════════`);
+  console.log(`║ Code: ${code.substring(0, 8)}...`);
+  console.log(`║ Client ID: ${codeData.client_id}`);
+  console.log(`║ Scope: ${codeData.scope}`);
+  console.log(`║ State: ${state || '(none)'}`);
+  console.log(`║ Redirect URI: ${codeData.redirect_uri}`);
+  console.log(`╚══════════════════════════════════════════════════════`);
+  
   // Store code in KV with TTL for automatic expiration
   await env.OAUTH_CODES.put(
     code,
@@ -1092,11 +1102,14 @@ export async function handleLocalOAuthAuthorizePost(request: Request, hostRoute:
     { expirationTtl: 600 } // 10 minutes TTL
   );
   
+  console.log(`Stored authorization code in KV: ${code.substring(0, 8)}...`);
+  
   // Redirect back to client
   const redirectUrl = new URL(formData.get('redirect_uri') as string);
   redirectUrl.searchParams.set('code', code);
-  const state = formData.get('state') as string;
   if (state) redirectUrl.searchParams.set('state', state);
+  
+  console.log(`Redirecting to client: ${redirectUrl.toString()}`);
   
   return Response.redirect(redirectUrl.toString(), 302);
 }
