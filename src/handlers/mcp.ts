@@ -8,6 +8,20 @@ import { getSession } from '../utils/session';
 import { isTokenExpired, refreshUpstreamToken } from '../utils/token';
 import { tryConnectUpstreamSSE } from './sse';
 
+/**
+ * Return 401 with Bearer challenge for SSE endpoints
+ */
+function sse401(reason: string = "Missing or invalid access token"): Response {
+  const headers = {
+    "WWW-Authenticate": 'Bearer realm="mcp", scope="mcp read write"',
+    "Content-Type": "application/json",
+  };
+  return new Response(JSON.stringify({
+    error: "invalid_token",
+    error_description: reason
+  }), { status: 401, headers });
+}
+
 export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
   const url = new URL(request.url);
   
@@ -17,16 +31,28 @@ export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo
     return handleWebSocketUpgrade(request, hostRoute, env);
   }
   
-  // Check for SSE endpoint
-  if (url.pathname === '/sse' && request.headers.get('Accept')?.includes('text/event-stream')) {
-    return handleMCPSSE(request, hostRoute, env);
+  // Check for SSE endpoint - handle both HEAD and GET
+  if (url.pathname === '/sse') {
+    // Handle HEAD request for /sse
+    if (request.method === 'HEAD') {
+      const authHeader = request.headers.get('Authorization');
+      if (!authHeader?.startsWith('Bearer ')) {
+        return sse401("Missing or invalid access token");
+      }
+      // If token exists, return 200 OK for HEAD request
+      return new Response(null, { status: 200 });
+    }
+    // Handle GET request for /sse
+    if (request.headers.get('Accept')?.includes('text/event-stream')) {
+      return handleMCPSSE(request, hostRoute, env);
+    }
   }
   
   // Get Bearer token from Authorization header
   const authHeader = request.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
     console.log('Missing Bearer token in Authorization header');
-    return new Response('Unauthorized: Bearer token required', { status: 401 });
+    return sse401('Missing or invalid access token');
   }
   
   const token = authHeader.substring(7);
@@ -34,21 +60,21 @@ export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo
   
   if (!tokenData) {
     console.log('Invalid or expired access token');
-    return new Response('Unauthorized: Invalid access token', { status: 401 });
+    return sse401('Invalid or expired access token');
   }
   
   // Get session to check for upstream tokens
   const session = await getSession(tokenData.sessionId, env);
   if (!session) {
     console.log('Session not found for token');
-    return new Response('Session expired', { status: 401 });
+    return sse401('Session expired');
   }
   
   // Get upstream OAuth tokens for this server
   const serverOAuth = session.oauth?.[hostRoute.serverDomain];
   if (!serverOAuth?.tokens) {
     console.log(`No upstream OAuth tokens for ${hostRoute.serverDomain}`);
-    return new Response('Upstream authentication required', { status: 401 });
+    return sse401('Upstream authentication required');
   }
   
   // Check if upstream token needs refresh
@@ -57,7 +83,7 @@ export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo
     const refreshed = await refreshUpstreamToken(hostRoute.serverDomain, session, env, tokenData.sessionId);
     if (!refreshed) {
       console.log('Failed to refresh upstream token');
-      return new Response('Failed to refresh upstream authentication', { status: 401 });
+      return sse401('Failed to refresh upstream authentication');
     }
   }
   
@@ -107,25 +133,25 @@ async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env)
   // Get Bearer token
   const authHeader = request.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
-    return new Response('Unauthorized: Bearer token required', { status: 401 });
+    return sse401("Missing or invalid access token");
   }
   
   const token = authHeader.substring(7);
   const tokenData = accessTokens.get(token);
   
   if (!tokenData) {
-    return new Response('Unauthorized: Invalid access token', { status: 401 });
+    return sse401("Invalid or expired access token");
   }
   
   // Get session and upstream tokens
   const session = await getSession(tokenData.sessionId, env);
   if (!session) {
-    return new Response('Session expired', { status: 401 });
+    return sse401("Session expired");
   }
   
   const serverOAuth = session.oauth?.[hostRoute.serverDomain];
   if (!serverOAuth?.tokens) {
-    return new Response('Upstream authentication required', { status: 401 });
+    return sse401("Upstream authentication required");
   }
   
   console.log(`\n╔══ SSE CONNECTION REQUEST ═══════════════════════════`);
@@ -179,25 +205,25 @@ async function handleWebSocketUpgrade(request: Request, hostRoute: MCPRouteInfo,
   // Get Bearer token
   const authHeader = request.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
-    return new Response('Unauthorized: Bearer token required for WebSocket', { status: 401 });
+    return sse401('Missing or invalid access token');
   }
   
   const token = authHeader.substring(7);
   const tokenData = accessTokens.get(token);
   
   if (!tokenData) {
-    return new Response('Unauthorized: Invalid access token', { status: 401 });
+    return sse401('Invalid or expired access token');
   }
   
   // Get session and upstream tokens
   const session = await getSession(tokenData.sessionId, env);
   if (!session) {
-    return new Response('Session expired', { status: 401 });
+    return sse401('Session expired');
   }
   
   const serverOAuth = session.oauth?.[hostRoute.serverDomain];
   if (!serverOAuth?.tokens) {
-    return new Response('Upstream authentication required', { status: 401 });
+    return sse401('Upstream authentication required');
   }
   
   console.log(`\n╔══ WEBSOCKET UPGRADE REQUEST ════════════════════════`);
