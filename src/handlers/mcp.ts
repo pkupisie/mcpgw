@@ -56,11 +56,35 @@ export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo
   }
   
   const token = authHeader.substring(7);
-  const tokenData = accessTokens.get(token);
+  
+  // Check KV first, then memory
+  let tokenData: any = null;
+  
+  if (env.TOKENS) {
+    const kvData = await env.TOKENS.get(`access:${token}`);
+    if (kvData) {
+      tokenData = JSON.parse(kvData);
+    }
+  }
+  
+  if (!tokenData) {
+    tokenData = accessTokens.get(token);
+  }
   
   if (!tokenData) {
     console.log('Invalid or expired access token');
     return sse401('Invalid or expired access token');
+  }
+  
+  // Check if token is expired (1 hour)
+  const isExpired = Date.now() - tokenData.created_at > 3600000;
+  if (isExpired) {
+    console.log('Access token expired');
+    if (env.TOKENS) {
+      await env.TOKENS.delete(`access:${token}`);
+    }
+    accessTokens.delete(token);
+    return sse401('Access token expired');
   }
   
   // Get session to check for upstream tokens
@@ -137,10 +161,33 @@ async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env)
   }
   
   const token = authHeader.substring(7);
-  const tokenData = accessTokens.get(token);
+  
+  // Check KV first, then memory
+  let tokenData: any = null;
+  
+  if (env.TOKENS) {
+    const kvData = await env.TOKENS.get(`access:${token}`);
+    if (kvData) {
+      tokenData = JSON.parse(kvData);
+    }
+  }
+  
+  if (!tokenData) {
+    tokenData = accessTokens.get(token);
+  }
   
   if (!tokenData) {
     return sse401("Invalid or expired access token");
+  }
+  
+  // Check if token is expired
+  const isExpired = Date.now() - tokenData.created_at > 3600000;
+  if (isExpired) {
+    if (env.TOKENS) {
+      await env.TOKENS.delete(`access:${token}`);
+    }
+    accessTokens.delete(token);
+    return sse401("Access token expired");
   }
   
   // Get session and upstream tokens
@@ -209,10 +256,33 @@ async function handleWebSocketUpgrade(request: Request, hostRoute: MCPRouteInfo,
   }
   
   const token = authHeader.substring(7);
-  const tokenData = accessTokens.get(token);
+  
+  // Check KV first, then memory
+  let tokenData: any = null;
+  
+  if (env.TOKENS) {
+    const kvData = await env.TOKENS.get(`access:${token}`);
+    if (kvData) {
+      tokenData = JSON.parse(kvData);
+    }
+  }
+  
+  if (!tokenData) {
+    tokenData = accessTokens.get(token);
+  }
   
   if (!tokenData) {
     return sse401('Invalid or expired access token');
+  }
+  
+  // Check if token is expired
+  const isExpired = Date.now() - tokenData.created_at > 3600000;
+  if (isExpired) {
+    if (env.TOKENS) {
+      await env.TOKENS.delete(`access:${token}`);
+    }
+    accessTokens.delete(token);
+    return sse401('Access token expired');
   }
   
   // Get session and upstream tokens

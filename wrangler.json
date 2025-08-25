@@ -17,6 +17,10 @@
     {
       "binding": "SESSIONS",
       "id": "90b8733355d74d9aa3e7d7f8df67cf40"
+    },
+    {
+      "binding": "TOKENS",
+      "id": "148dedc510b9467ebadcb551f83f9608"
     }
   ]
 }

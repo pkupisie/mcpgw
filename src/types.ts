@@ -111,4 +111,5 @@ export interface Env {
   LOCAL_PASSWORD: string;
   OAUTH_CODES: KVNamespace;
   SESSIONS: KVNamespace;
+  TOKENS: KVNamespace;
 }

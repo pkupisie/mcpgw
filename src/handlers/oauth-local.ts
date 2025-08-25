@@ -348,27 +348,44 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     // Generate access token
     const access_token = generateRandomString(40);
     const refresh_token = generateRandomString(40);
+    const now = Date.now();
     
-    // Store access token globally
-    accessTokens.set(access_token, {
+    // Store access token in KV and memory
+    const accessTokenData = {
       client_id,
       sessionId: codeData.sessionId,
       serverDomain: codeData.serverDomain,
       hostname: codeData.hostname,
       scope: codeData.scope,
-      created_at: Date.now()
-    });
+      created_at: now
+    };
     
-    // Store refresh token globally
-    refreshTokens.set(refresh_token, {
+    if (env.TOKENS) {
+      // Store with 1 hour TTL
+      await env.TOKENS.put(`access:${access_token}`, JSON.stringify(accessTokenData), {
+        expirationTtl: 3600
+      });
+    }
+    accessTokens.set(access_token, accessTokenData);
+    
+    // Store refresh token in KV and memory
+    const refreshTokenData = {
       client_id,
       sessionId: codeData.sessionId,
       serverDomain: codeData.serverDomain,
       hostname: codeData.hostname,
       scope: codeData.scope,
-      created_at: Date.now(),
+      created_at: now,
       access_token
-    });
+    };
+    
+    if (env.TOKENS) {
+      // Store with 30 day TTL
+      await env.TOKENS.put(`refresh:${refresh_token}`, JSON.stringify(refreshTokenData), {
+        expirationTtl: 30 * 24 * 60 * 60
+      });
+    }
+    refreshTokens.set(refresh_token, refreshTokenData);
     
     const tokenResponse = {
       access_token,
@@ -416,8 +433,19 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       });
     }
     
-    // Look up refresh token
-    const refreshTokenData = refreshTokens.get(refresh_token);
+    // Look up refresh token from KV first, then memory
+    let refreshTokenData: any = null;
+    
+    if (env.TOKENS) {
+      const kvData = await env.TOKENS.get(`refresh:${refresh_token}`);
+      if (kvData) {
+        refreshTokenData = JSON.parse(kvData);
+      }
+    }
+    
+    if (!refreshTokenData) {
+      refreshTokenData = refreshTokens.get(refresh_token);
+    }
     if (!refreshTokenData) {
       console.log(`║ Result: FAILED - Invalid refresh token`);
       console.log(`╚══════════════════════════════════════════════════════`);
@@ -454,6 +482,10 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     // Check if refresh token is expired (30 days)
     const refreshTokenAge = Date.now() - refreshTokenData.created_at;
     if (refreshTokenAge > 30 * 24 * 60 * 60 * 1000) {
+      // Delete from KV and memory
+      if (env.TOKENS) {
+        await env.TOKENS.delete(`refresh:${refresh_token}`);
+      }
       refreshTokens.delete(refresh_token);
       console.log(`║ Result: FAILED - Refresh token expired`);
       console.log(`╚══════════════════════════════════════════════════════`);
@@ -472,38 +504,57 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     
     // Delete old access token if it exists
     if (refreshTokenData.access_token) {
+      if (env.TOKENS) {
+        await env.TOKENS.delete(`access:${refreshTokenData.access_token}`);
+      }
       accessTokens.delete(refreshTokenData.access_token);
     }
     
-    // Generate new access token
+    // Generate new tokens
     const new_access_token = generateRandomString(40);
-    
-    // Generate new refresh token (rotation for better security)
     const new_refresh_token = generateRandomString(40);
+    const now = Date.now();
     
-    // Store new access token
-    accessTokens.set(new_access_token, {
-      client_id: refreshTokenData.client_id,
-      sessionId: refreshTokenData.sessionId,
-      serverDomain: refreshTokenData.serverDomain,
-      hostname: refreshTokenData.hostname,
-      scope: scope || refreshTokenData.scope,  // Use provided scope or original
-      created_at: Date.now()
-    });
-    
-    // Delete old refresh token
-    refreshTokens.delete(refresh_token);
-    
-    // Store new refresh token
-    refreshTokens.set(new_refresh_token, {
+    // Store new access token in KV and memory
+    const newAccessTokenData = {
       client_id: refreshTokenData.client_id,
       sessionId: refreshTokenData.sessionId,
       serverDomain: refreshTokenData.serverDomain,
       hostname: refreshTokenData.hostname,
       scope: scope || refreshTokenData.scope,
-      created_at: Date.now(),
+      created_at: now
+    };
+    
+    if (env.TOKENS) {
+      await env.TOKENS.put(`access:${new_access_token}`, JSON.stringify(newAccessTokenData), {
+        expirationTtl: 3600
+      });
+    }
+    accessTokens.set(new_access_token, newAccessTokenData);
+    
+    // Delete old refresh token from KV and memory
+    if (env.TOKENS) {
+      await env.TOKENS.delete(`refresh:${refresh_token}`);
+    }
+    refreshTokens.delete(refresh_token);
+    
+    // Store new refresh token in KV and memory
+    const newRefreshTokenData = {
+      client_id: refreshTokenData.client_id,
+      sessionId: refreshTokenData.sessionId,
+      serverDomain: refreshTokenData.serverDomain,
+      hostname: refreshTokenData.hostname,
+      scope: scope || refreshTokenData.scope,
+      created_at: now,
       access_token: new_access_token
-    });
+    };
+    
+    if (env.TOKENS) {
+      await env.TOKENS.put(`refresh:${new_refresh_token}`, JSON.stringify(newRefreshTokenData), {
+        expirationTtl: 30 * 24 * 60 * 60
+      });
+    }
+    refreshTokens.set(new_refresh_token, newRefreshTokenData);
     
     const tokenResponse = {
       access_token: new_access_token,
@@ -532,7 +583,19 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     const device_code = formData.get('device_code') as string;
     const client_id = formData.get('client_id') as string;
     
-    const deviceData = deviceCodes.get(device_code);
+    // Look up device code from KV first, then memory
+    let deviceData: any = null;
+    
+    if (env.TOKENS) {
+      const kvData = await env.TOKENS.get(`device:${device_code}`);
+      if (kvData) {
+        deviceData = JSON.parse(kvData);
+      }
+    }
+    
+    if (!deviceData) {
+      deviceData = deviceCodes.get(device_code);
+    }
     if (!deviceData) {
       return new Response(JSON.stringify({ error: 'expired_token' }), {
         status: 400,
@@ -558,28 +621,48 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     // Generate tokens
     const access_token = generateRandomString(40);
     const refresh_token = generateRandomString(40);
+    const now = Date.now();
+    const hostname = new URL(request.url).hostname;
     
-    // Store access token
-    accessTokens.set(access_token, {
+    // Store access token in KV and memory
+    const accessTokenData = {
       client_id: deviceData.client_id,
       sessionId: '', // Device flow doesn't use sessionId
       serverDomain: hostRoute.serverDomain,
-      hostname: new URL(request.url).hostname,
+      hostname: hostname,
       scope: deviceData.scope || 'mcp',
-      created_at: Date.now()
-    });
+      created_at: now
+    };
     
-    // Store refresh token
-    refreshTokens.set(refresh_token, {
+    if (env.TOKENS) {
+      await env.TOKENS.put(`access:${access_token}`, JSON.stringify(accessTokenData), {
+        expirationTtl: 3600
+      });
+    }
+    accessTokens.set(access_token, accessTokenData);
+    
+    // Store refresh token in KV and memory
+    const refreshTokenData = {
       client_id: deviceData.client_id,
       sessionId: '', // Device flow doesn't use sessionId
       serverDomain: hostRoute.serverDomain,
-      hostname: new URL(request.url).hostname,
+      hostname: hostname,
       scope: deviceData.scope || 'mcp',
-      created_at: Date.now(),
+      created_at: now,
       access_token
-    });
+    };
     
+    if (env.TOKENS) {
+      await env.TOKENS.put(`refresh:${refresh_token}`, JSON.stringify(refreshTokenData), {
+        expirationTtl: 30 * 24 * 60 * 60
+      });
+    }
+    refreshTokens.set(refresh_token, refreshTokenData);
+    
+    // Delete device code from KV and memory
+    if (env.TOKENS) {
+      await env.TOKENS.delete(`device:${device_code}`);
+    }
     deviceCodes.delete(device_code);
     
     return new Response(JSON.stringify({
@@ -623,19 +706,30 @@ async function handleLocalOAuthDevice(request: Request, hostRoute: MCPRouteInfo,
   const verification_uri = `https://${getCurrentDomain(request)}/oauth/device/verify`;
   const verification_uri_complete = `${verification_uri}?user_code=${user_code}`;
   
-  // Store device code
-  deviceCodes.set(device_code, {
+  // Store device code in KV and memory
+  const deviceData = {
     client_id,
     user_code,
     scope,
     authorized: false,
     created_at: Date.now()
-  });
+  };
   
-  // Map user code to device code for easy lookup
+  if (env.TOKENS) {
+    // Store with 15 minute TTL
+    await env.TOKENS.put(`device:${device_code}`, JSON.stringify(deviceData), {
+      expirationTtl: 900
+    });
+    // Also store user code mapping
+    await env.TOKENS.put(`usercode:${user_code}`, device_code, {
+      expirationTtl: 900
+    });
+  }
+  
+  deviceCodes.set(device_code, deviceData);
   userCodeMap.set(user_code, device_code);
   
-  // Clean up old codes after 15 minutes
+  // Clean up memory after 15 minutes (KV has TTL)
   setTimeout(() => {
     deviceCodes.delete(device_code);
     userCodeMap.delete(user_code);
@@ -659,9 +753,25 @@ async function handleLocalOAuthDevice(request: Request, hostRoute: MCPRouteInfo,
 async function handleLocalOAuthRevoke(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
   const formData = await request.formData();
   const token = formData.get('token') as string;
+  const token_type_hint = formData.get('token_type_hint') as string;
   
   if (token) {
-    accessTokens.delete(token);
+    // Try to determine token type and delete from appropriate stores
+    if (token_type_hint === 'refresh_token' || !token_type_hint) {
+      // Delete as refresh token
+      if (env.TOKENS) {
+        await env.TOKENS.delete(`refresh:${token}`);
+      }
+      refreshTokens.delete(token);
+    }
+    
+    if (token_type_hint === 'access_token' || !token_type_hint) {
+      // Delete as access token
+      if (env.TOKENS) {
+        await env.TOKENS.delete(`access:${token}`);
+      }
+      accessTokens.delete(token);
+    }
   }
   
   return new Response(null, { status: 200 });
@@ -670,8 +780,43 @@ async function handleLocalOAuthRevoke(request: Request, hostRoute: MCPRouteInfo,
 async function handleLocalOAuthIntrospect(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
   const formData = await request.formData();
   const token = formData.get('token') as string;
+  const token_type_hint = formData.get('token_type_hint') as string;
   
-  const tokenData = accessTokens.get(token);
+  // Try to find token in KV first, then memory
+  let tokenData: any = null;
+  let tokenType: string = '';
+  
+  // Check as access token first (most common)
+  if (!token_type_hint || token_type_hint === 'access_token') {
+    if (env.TOKENS) {
+      const kvData = await env.TOKENS.get(`access:${token}`);
+      if (kvData) {
+        tokenData = JSON.parse(kvData);
+        tokenType = 'access_token';
+      }
+    }
+    
+    if (!tokenData) {
+      tokenData = accessTokens.get(token);
+      if (tokenData) tokenType = 'access_token';
+    }
+  }
+  
+  // Check as refresh token if not found
+  if (!tokenData && (!token_type_hint || token_type_hint === 'refresh_token')) {
+    if (env.TOKENS) {
+      const kvData = await env.TOKENS.get(`refresh:${token}`);
+      if (kvData) {
+        tokenData = JSON.parse(kvData);
+        tokenType = 'refresh_token';
+      }
+    }
+    
+    if (!tokenData) {
+      tokenData = refreshTokens.get(token);
+      if (tokenData) tokenType = 'refresh_token';
+    }
+  }
   
   if (!tokenData) {
     return new Response(JSON.stringify({ active: false }), {
@@ -682,11 +827,22 @@ async function handleLocalOAuthIntrospect(request: Request, hostRoute: MCPRouteI
     });
   }
   
-  // Check if token is expired (1 hour)
-  const isExpired = Date.now() - tokenData.created_at > 3600000;
+  // Check expiration based on token type
+  const expirationMs = tokenType === 'refresh_token' ? 30 * 24 * 60 * 60 * 1000 : 3600000;
+  const isExpired = Date.now() - tokenData.created_at > expirationMs;
   
   if (isExpired) {
-    accessTokens.delete(token);
+    // Clean up expired token from KV and memory
+    if (env.TOKENS) {
+      await env.TOKENS.delete(`${tokenType === 'refresh_token' ? 'refresh' : 'access'}:${token}`);
+    }
+    
+    if (tokenType === 'refresh_token') {
+      refreshTokens.delete(token);
+    } else {
+      accessTokens.delete(token);
+    }
+    
     return new Response(JSON.stringify({ active: false }), {
       headers: { 
         'Content-Type': 'application/json',
@@ -700,7 +856,7 @@ async function handleLocalOAuthIntrospect(request: Request, hostRoute: MCPRouteI
     scope: tokenData.scope || 'mcp',
     client_id: tokenData.client_id,
     token_type: 'Bearer',
-    exp: Math.floor((tokenData.created_at + 3600000) / 1000)
+    exp: Math.floor((tokenData.created_at + expirationMs) / 1000)
   }), {
     headers: { 
       'Content-Type': 'application/json',
@@ -730,18 +886,50 @@ async function handleDeviceVerifyPost(request: Request, hostRoute: MCPRouteInfo,
   const formData = await request.formData();
   const user_code = formData.get('user_code') as string;
   
-  const device_code = userCodeMap.get(user_code);
+  // Look up device code from user code mapping
+  let device_code: string | null = null;
+  
+  if (env.TOKENS) {
+    device_code = await env.TOKENS.get(`usercode:${user_code}`);
+  }
+  
+  if (!device_code) {
+    device_code = userCodeMap.get(user_code) || null;
+  }
+  
   if (!device_code) {
     return new Response('Invalid code', { status: 400 });
   }
   
-  const deviceData = deviceCodes.get(device_code);
+  // Get device data from KV or memory
+  let deviceData: any = null;
+  
+  if (env.TOKENS) {
+    const kvData = await env.TOKENS.get(`device:${device_code}`);
+    if (kvData) {
+      deviceData = JSON.parse(kvData);
+    }
+  }
+  
+  if (!deviceData) {
+    deviceData = deviceCodes.get(device_code);
+  }
+  
   if (!deviceData) {
     return new Response('Code expired', { status: 400 });
   }
   
-  // Mark as authorized
+  // Mark as authorized and update in KV
   deviceData.authorized = true;
+  
+  if (env.TOKENS) {
+    await env.TOKENS.put(`device:${device_code}`, JSON.stringify(deviceData), {
+      expirationTtl: 900 // Keep original TTL
+    });
+  }
+  
+  // Update in memory too
+  deviceCodes.set(device_code, deviceData);
   
   return new Response('Device authorized! You can close this window.', {
     headers: { 'Content-Type': 'text/plain' }
