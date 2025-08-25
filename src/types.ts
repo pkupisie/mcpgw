@@ -2,16 +2,6 @@
  * Type definitions for MCP OAuth Gateway
  */
 
-export interface MCPServerConfig {
-  domain: string;
-  name: string;
-  authzEndpoint: string;
-  tokenEndpoint: string;
-  clientId: string;
-  clientSecret?: string;
-  scopes: string;
-}
-
 export interface SessionData {
   csrf: string;
   localAuth: boolean;
@@ -26,6 +16,16 @@ export interface SessionData {
         expires_in?: number;
       };
       expiresAt?: number;
+      client?: {
+        client_id: string;
+        client_secret?: string;
+      };
+      config?: {
+        authorization_endpoint: string;
+        token_endpoint: string;
+        client_id: string;
+        client_secret?: string;
+      };
     };
   };
   localOAuthTokens?: {
@@ -61,8 +61,10 @@ export interface SessionData {
 }
 
 export interface MCPRouteInfo {
-  upstreamBase: URL;
   serverDomain: string;
+  encodedDomain?: string;
+  isEncoded: boolean;
+  upstreamBase?: URL;
 }
 
 export interface RegisteredClient {
@@ -97,7 +99,6 @@ export interface Env {
   DOMAIN_ROOT: string;
   LOCAL_USER: string;
   LOCAL_PASSWORD: string;
-  MCP_SERVERS: string;
   OAUTH_CODES: KVNamespace;
   SESSIONS: KVNamespace;
 }

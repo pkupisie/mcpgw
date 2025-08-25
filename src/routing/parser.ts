@@ -36,7 +36,9 @@ export function parseHostEncodedUpstream(hostname: string, domainRoot: string): 
           
           return {
             upstreamBase: targetUrl,
-            serverDomain: targetUrl.hostname
+            serverDomain: targetUrl.hostname,
+            encodedDomain: label,
+            isEncoded: true
           };
         } catch {
           return null;

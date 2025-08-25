@@ -2,7 +2,7 @@
  * Dashboard handler for MCP OAuth Gateway
  */
 
-import type { Env, MCPServerConfig } from '../types';
+import type { Env } from '../types';
 import { getSessionId, getSession } from '../utils/session';
 import { getCurrentDomain } from '../utils/url';
 import { generateEncodedHostname } from '../utils/url';
@@ -15,29 +15,24 @@ export async function handleDashboard(request: Request, env: Env): Promise<Respo
     return Response.redirect(`https://${getCurrentDomain(request)}/login`, 302);
   }
   
-  // Parse MCP servers
-  let mcpServers: MCPServerConfig[] = [];
-  try {
-    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
-  } catch (e) {
-    console.error('Failed to parse MCP_SERVERS:', e);
-  }
+  // Show connected servers from session
+  let serversHtml = '<h2>Connected MCP Servers</h2>';
+  const connectedServers = Object.entries(session.oauth || {});
   
-  let serversHtml = '<h2>MCP Servers</h2>';
-  if (mcpServers.length === 0) {
-    serversHtml += '<p>No MCP servers configured.</p>';
+  if (connectedServers.length === 0) {
+    serversHtml += '<p>No MCP servers connected yet. Use the form below to connect to a server.</p>';
   } else {
     serversHtml += '<ul>';
-    for (const server of mcpServers) {
-      const isConnected = !!(session.oauth?.[server.domain]?.tokens);
-      const encodedHostname = generateEncodedHostname(server.domain, env.DOMAIN_ROOT);
+    for (const [domain, data] of connectedServers) {
+      const isConnected = !!(data.tokens);
+      const encodedHostname = generateEncodedHostname(domain, env.DOMAIN_ROOT);
       const encodedUrl = `https://${encodedHostname}/`;
       serversHtml += `
         <li>
-          <strong>${server.name}</strong> (${server.domain}) 
-          ${isConnected ? '✅ Connected' : '❌ Not connected'}
-          <br><small>URL: <code>${encodedUrl}</code></small>
-          ${!isConnected ? `<br><a href="/oauth/start?server=${encodeURIComponent(server.domain)}">Connect</a>` : ''}
+          <strong>${domain}</strong> 
+          ${isConnected ? '✅ Connected' : '⏳ Auth in progress'}
+          <br><small>MCP URL for Claude: <code>${encodedUrl}</code></small>
+          ${!isConnected ? `<br><a href="/oauth/start?server=${encodeURIComponent(domain)}">Reconnect</a>` : ''}
         </li>`;
     }
     serversHtml += '</ul>';
@@ -47,11 +42,13 @@ export async function handleDashboard(request: Request, env: Env): Promise<Respo
     <h1>MCP OAuth Gateway</h1>
     <p>Domain root: <code>${env.DOMAIN_ROOT}</code></p>
     ${serversHtml}
-    <h3>Add New Server</h3>
+    <h3>Connect to New MCP Server</h3>
+    <p>Enter the domain of an MCP server that supports OAuth:</p>
     <form method="GET" action="/encode">
-      <label>Domain: <input name="domain" placeholder="mcp.example.com" required></label>
-      <button type="submit">Generate URL</button>
+      <label>Server Domain: <input name="domain" placeholder="mcp.example.com" required></label>
+      <button type="submit">Generate Encoded URL</button>
     </form>
+    <p><small>The gateway will automatically discover OAuth endpoints from the server.</small></p>
   </body></html>`;
   
   return new Response(html, {

@@ -2,12 +2,13 @@
  * Upstream OAuth handlers for MCP OAuth Gateway
  */
 
-import type { Env, MCPServerConfig, MCPRouteInfo, SessionData } from '../types';
+import type { Env, MCPRouteInfo, SessionData } from '../types';
 import { sessions } from '../stores';
 import { getSessionId, getSession, saveSession } from '../utils/session';
 import { generateRandomString, sha256Base64Url } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';
 import { isTokenExpired } from '../utils/token';
+import { discoverOAuthConfig, registerDynamicClient } from '../utils/oauth-discovery';
 
 export async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
   const sessionId = getSessionId(request);
@@ -24,49 +25,15 @@ export async function handleOAuthStart(request: Request, env: Env): Promise<Resp
     return new Response('Missing server parameter', { status: 400 });
   }
   
-  // Parse MCP servers config
-  let mcpServers: MCPServerConfig[] = [];
-  try {
-    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
-  } catch (e) {
-    return new Response('Invalid MCP_SERVERS configuration', { status: 500 });
-  }
-  
-  const serverConfig = mcpServers.find(s => s.domain === serverDomain);
-  
-  if (!serverConfig) {
-    return new Response('Unknown server', { status: 404 });
-  }
-  
-  // Generate OAuth state and PKCE
-  const state = generateRandomString(32);
-  const pkceVerifier = generateRandomString(64);
-  const pkceChallenge = await sha256Base64Url(pkceVerifier);
-  
-  // Store OAuth state in session
-  if (!session.oauth) session.oauth = {};
-  session.oauth[serverDomain] = {
-    state,
-    pkceVerifier
+  // Create a mock hostRoute for initiateUpstreamOAuth
+  const hostRoute: MCPRouteInfo = {
+    serverDomain,
+    encodedDomain: '', // Not needed for OAuth start
+    isEncoded: false
   };
   
-  // Save updated session to KV
-  await saveSession(sessionId!, session, env);
-  
-  // Build authorization URL
-  const authUrl = new URL(serverConfig.authzEndpoint);
-  authUrl.searchParams.set('client_id', serverConfig.clientId);
-  authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('redirect_uri', `https://${getCurrentDomain(request)}/oauth/callback`);
-  authUrl.searchParams.set('state', state);
-  authUrl.searchParams.set('scope', serverConfig.scopes);
-  authUrl.searchParams.set('code_challenge', pkceChallenge);
-  authUrl.searchParams.set('code_challenge_method', 'S256');
-  
-  console.log(`Starting OAuth flow for ${serverDomain}`);
-  console.log(`Redirect URL: ${authUrl.toString()}`);
-  
-  return Response.redirect(authUrl.toString(), 302);
+  // Use the same OAuth discovery flow
+  return initiateUpstreamOAuth(request, hostRoute, session, env);
 }
 
 export async function handleOAuthCallback(request: Request, env: Env): Promise<Response> {
@@ -103,34 +70,27 @@ export async function handleOAuthCallback(request: Request, env: Env): Promise<R
     return new Response('Invalid state', { status: 400 });
   }
   
-  // Parse MCP servers config
-  let mcpServers: MCPServerConfig[] = [];
-  try {
-    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
-  } catch (e) {
-    return new Response('Invalid MCP_SERVERS configuration', { status: 500 });
-  }
-  
-  const serverConfig = mcpServers.find(s => s.domain === serverDomain);
-  
-  if (!serverConfig) {
-    return new Response('Unknown server', { status: 404 });
-  }
-  
   const serverData = session.oauth![serverDomain];
   
+  // Get the stored OAuth config from session
+  const storedConfig = serverData.config;
+  if (!storedConfig) {
+    console.error(`No stored OAuth config for ${serverDomain}`);
+    return new Response('OAuth configuration not found', { status: 500 });
+  }
+  
   // Exchange code for tokens
-  const tokenUrl = new URL(serverConfig.tokenEndpoint);
+  const tokenUrl = new URL(storedConfig.token_endpoint);
   const tokenBody = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
     redirect_uri: `https://${getCurrentDomain(request)}/oauth/callback`,
-    client_id: serverConfig.clientId,
+    client_id: storedConfig.client_id,
     code_verifier: serverData.pkceVerifier!
   });
   
-  if (serverConfig.clientSecret) {
-    tokenBody.set('client_secret', serverConfig.clientSecret);
+  if (storedConfig.client_secret) {
+    tokenBody.set('client_secret', storedConfig.client_secret);
   }
   
   console.log(`Exchanging code for tokens with ${serverDomain}`);
@@ -180,20 +140,65 @@ export async function handleOAuthCallback(request: Request, env: Env): Promise<R
 }
 
 export async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, session: SessionData, env: Env): Promise<Response> {
-  // Parse MCP servers config
-  let mcpServers: MCPServerConfig[] = [];
-  try {
-    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
-  } catch (e) {
-    console.error('Failed to parse MCP_SERVERS:', e);
-    return new Response('Server configuration error', { status: 500 });
+  const redirectUri = `https://${getCurrentDomain(request)}/oauth/callback`;
+  
+  // Try to discover OAuth configuration from upstream server
+  console.log(`\n╔══ DISCOVERING OAUTH CONFIG ═════════════════════════`);
+  console.log(`║ Server: ${hostRoute.serverDomain}`);
+  
+  const oauthConfig = await discoverOAuthConfig(hostRoute.serverDomain);
+  
+  if (!oauthConfig) {
+    console.log(`║ Discovery failed - server may not support OAuth`);
+    console.log(`╚══════════════════════════════════════════════════════`);
+    return new Response('OAuth discovery failed. Server may not support OAuth.', { status: 502 });
   }
   
-  const serverConfig = mcpServers.find(s => s.domain === hostRoute.serverDomain);
+  console.log(`║ Authorization: ${oauthConfig.authorization_endpoint}`);
+  console.log(`║ Token: ${oauthConfig.token_endpoint}`);
   
-  if (!serverConfig) {
-    console.error(`No config found for server: ${hostRoute.serverDomain}`);
-    return new Response('Unknown MCP server', { status: 404 });
+  // Check if we need to register a dynamic client
+  let clientId: string;
+  let clientSecret: string | undefined;
+  
+  // Check if we have a stored client for this server
+  const storedClient = session.oauth?.[hostRoute.serverDomain]?.client;
+  if (storedClient) {
+    clientId = storedClient.client_id;
+    clientSecret = storedClient.client_secret;
+    console.log(`║ Using stored client: ${clientId}`);
+  } else if (oauthConfig.registration_endpoint) {
+    // Try dynamic client registration
+    console.log(`║ Attempting dynamic client registration...`);
+    const registration = await registerDynamicClient(
+      hostRoute.serverDomain,
+      oauthConfig.registration_endpoint,
+      redirectUri
+    );
+    
+    if (!registration) {
+      console.log(`║ Registration failed - trying with default client`);
+      // Fallback to a default client ID
+      clientId = 'mcp-oauth-gateway';
+    } else {
+      clientId = registration.client_id;
+      clientSecret = registration.client_secret;
+      console.log(`║ Registered client: ${clientId}`);
+      
+      // Store the client registration in session
+      if (!session.oauth) session.oauth = {};
+      if (!session.oauth[hostRoute.serverDomain]) {
+        session.oauth[hostRoute.serverDomain] = {};
+      }
+      session.oauth[hostRoute.serverDomain].client = {
+        client_id: clientId,
+        client_secret: clientSecret
+      };
+    }
+  } else {
+    // Use a default client ID if no registration endpoint
+    clientId = 'mcp-oauth-gateway';
+    console.log(`║ Using default client ID: ${clientId}`);
   }
   
   // Generate OAuth state and PKCE
@@ -203,9 +208,20 @@ export async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRout
   
   // Store OAuth state in session
   if (!session.oauth) session.oauth = {};
+  if (!session.oauth[hostRoute.serverDomain]) {
+    session.oauth[hostRoute.serverDomain] = {};
+  }
+  
   session.oauth[hostRoute.serverDomain] = {
+    ...session.oauth[hostRoute.serverDomain],
     state,
-    pkceVerifier
+    pkceVerifier,
+    config: {
+      authorization_endpoint: oauthConfig.authorization_endpoint,
+      token_endpoint: oauthConfig.token_endpoint,
+      client_id: clientId,
+      client_secret: clientSecret
+    }
   };
   
   // Get session ID from request to save
@@ -214,21 +230,23 @@ export async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRout
     await saveSession(sessionId, session, env);
   }
   
+  // Determine scopes to request
+  const scopes = oauthConfig.scopes_supported?.includes('mcp') 
+    ? 'mcp read write'
+    : oauthConfig.scopes_supported?.join(' ') || 'read write';
+  
   // Build authorization URL
-  const authUrl = new URL(serverConfig.authzEndpoint);
+  const authUrl = new URL(oauthConfig.authorization_endpoint);
   authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('client_id', serverConfig.clientId);
-  authUrl.searchParams.set('redirect_uri', `https://${getCurrentDomain(request)}/oauth/callback`);
+  authUrl.searchParams.set('client_id', clientId);
+  authUrl.searchParams.set('redirect_uri', redirectUri);
   authUrl.searchParams.set('state', state);
-  authUrl.searchParams.set('scope', serverConfig.scopes);
+  authUrl.searchParams.set('scope', scopes);
   authUrl.searchParams.set('code_challenge', pkceChallenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
   
-  console.log(`\n╔══ INITIATING UPSTREAM OAUTH ════════════════════════`);
-  console.log(`║ Server: ${hostRoute.serverDomain}`);
-  console.log(`║ Client ID: ${serverConfig.clientId}`);
-  console.log(`║ Scopes: ${serverConfig.scopes}`);
-  console.log(`║ Auth URL: ${authUrl.toString()}`);
+  console.log(`║ Scopes: ${scopes}`);
+  console.log(`║ Redirect URI: ${redirectUri}`);
   console.log(`╚══════════════════════════════════════════════════════`);
   
   return Response.redirect(authUrl.toString(), 302);

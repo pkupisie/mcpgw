@@ -2,8 +2,8 @@
  * Token management utilities for MCP OAuth Gateway
  */
 
-import type { SessionData, MCPServerConfig, Env } from '../types';
-import { saveSession, getSessionId } from './session';
+import type { SessionData, Env } from '../types';
+import { saveSession } from './session';
 
 // Check if token is expired with optional buffer
 export function isTokenExpired(serverOAuth: any, bufferSeconds: number = 300): boolean {
@@ -20,31 +20,22 @@ export async function refreshUpstreamToken(serverDomain: string, session: Sessio
     return false;
   }
   
-  // Parse MCP servers config
-  let mcpServers: MCPServerConfig[] = [];
-  try {
-    mcpServers = JSON.parse(env.MCP_SERVERS || '[]');
-  } catch (e) {
-    console.error('Failed to parse MCP_SERVERS:', e);
+  // Get stored OAuth config from session
+  const storedConfig = serverData.config;
+  if (!storedConfig) {
+    console.error(`No stored OAuth config for ${serverDomain}`);
     return false;
   }
   
-  const serverConfig = mcpServers.find(s => s.domain === serverDomain);
-  
-  if (!serverConfig) {
-    console.error(`No config found for server: ${serverDomain}`);
-    return false;
-  }
-  
-  const tokenUrl = new URL(serverConfig.tokenEndpoint);
+  const tokenUrl = new URL(storedConfig.token_endpoint);
   const tokenBody = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: serverData.tokens.refresh_token,
-    client_id: serverConfig.clientId
+    client_id: storedConfig.client_id
   });
   
-  if (serverConfig.clientSecret) {
-    tokenBody.set('client_secret', serverConfig.clientSecret);
+  if (storedConfig.client_secret) {
+    tokenBody.set('client_secret', storedConfig.client_secret);
   }
   
   try {
