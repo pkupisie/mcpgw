@@ -244,12 +244,22 @@ function parseHostEncodedUpstream(hostname: string, domainRoot: string): MCPRout
 
 // MCP request handler
 async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
-  const hostname = new URL(request.url).hostname;
+  const url = new URL(request.url);
+  const hostname = url.hostname;
+  
+  // Log ALL incoming requests for debugging
+  console.log(`\n=== MCP Request ===`);
+  console.log(`URL: ${request.method} ${url.pathname}`);
+  console.log(`Host: ${hostname}`);
   
   // Check if this is an MCP client trying to connect
   const mcpProtocolVersion = request.headers.get('mcp-protocol-version');
   const userAgent = request.headers.get('user-agent');
   const authHeader = request.headers.get('Authorization');
+  
+  console.log(`MCP Protocol: ${mcpProtocolVersion || 'not sent'}`);
+  console.log(`User-Agent: ${userAgent || 'not sent'}`);
+  console.log(`Authorization: ${authHeader ? `Bearer ${authHeader.slice(7, 20)}...` : 'none'}`);
   
   // If it's an MCP client without auth, check if it's accessing public endpoints
   if (mcpProtocolVersion && (!authHeader || !authHeader.startsWith('Bearer '))) {
@@ -281,27 +291,42 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
         ? 'Bearer realm="mcp", scope="mcp read write"'
         : 'Bearer realm="OAuth", error="invalid_token", error_description="Missing or invalid access token"';
       
-      return new Response(JSON.stringify({ 
+      const responseBody = JSON.stringify({ 
         error: 'invalid_token',
         error_description: 'Missing or invalid access token'
-      }), { 
+      });
+      
+      const responseHeaders = { 
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': wwwAuthHeader
+      };
+      
+      console.log(`Sending 401 response for ${url.pathname}:`);
+      console.log(`  Status: 401`);
+      console.log(`  Headers:`, responseHeaders);
+      console.log(`  Body:`, responseBody);
+      
+      return new Response(responseBody, { 
         status: 401,
-        headers: { 
-          'Content-Type': 'application/json',
-          'WWW-Authenticate': wwwAuthHeader
-        }
+        headers: responseHeaders
       });
     }
   }
   
-  // Handle authenticated MCP clients accessing SSE
-  if (mcpProtocolVersion && authHeader && authHeader.startsWith('Bearer ')) {
+  // Handle authenticated clients accessing SSE (with or without MCP protocol header)
+  // Claude might not send mcp-protocol-version header after OAuth flow completes
+  if (authHeader && authHeader.startsWith('Bearer ')) {
     const url = new URL(request.url);
+    
+    console.log(`Authenticated request detected for ${url.pathname}`);
+    console.log(`  Method: ${request.method}`);
+    console.log(`  MCP Protocol: ${mcpProtocolVersion || 'not sent'}`);
+    console.log(`  Auth header: Bearer ${authHeader.slice(7, 20)}...`);
     
     if (url.pathname === '/sse') {
       // HEAD request for SSE discovery
       if (request.method === 'HEAD') {
-        console.log('Authenticated MCP SSE discovery HEAD request');
+        console.log('Processing authenticated SSE discovery HEAD request');
         return new Response(null, {
           status: 200,
           headers: {
@@ -317,7 +342,7 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
       
       // GET request for SSE stream
       if (request.method === 'GET') {
-        console.log('Authenticated MCP SSE stream GET request');
+        console.log('Processing authenticated SSE stream GET request');
         // Validate the token first
         const localToken = authHeader.slice(7);
         const tokenData = accessTokens.get(localToken);
