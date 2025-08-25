@@ -194,7 +194,7 @@ async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env)
   return new Response(readable, {
     headers: {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': 'no-cache, no-transform',
       'Connection': 'keep-alive',
       'Access-Control-Allow-Origin': '*'
     }
