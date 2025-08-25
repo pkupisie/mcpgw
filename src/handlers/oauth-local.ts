@@ -175,9 +175,12 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
   }
   
   // Check if we have upstream tokens for this server
+  console.log(`║ Checking upstream tokens for: ${hostRoute.serverDomain}`);
   const upstreamTokens = session.oauth?.[hostRoute.serverDomain]?.tokens;
+  console.log(`║ Upstream tokens exist: ${upstreamTokens ? 'Yes' : 'No'}`);
   
   if (!upstreamTokens) {
+    console.log(`║ No upstream tokens found - initiating upstream OAuth`);
     // Save pending client authorization
     session.pendingClientAuth = {
       client_id: formData.get('client_id') as string,
@@ -196,6 +199,10 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
     // Redirect to upstream OAuth
     return initiateUpstreamOAuth(request, hostRoute, session, env);
   }
+  
+  // If we reach here, we have upstream tokens - issue authorization code
+  console.log(`║ Have upstream tokens - issuing authorization code`);
+  console.log(`║ Upstream server: ${hostRoute.serverDomain}`);
   
   // Store authorization code data globally
   const hostname = new URL(request.url).hostname;
