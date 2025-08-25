@@ -7,10 +7,33 @@ import { sessions, authorizationCodes, accessTokens, deviceCodes, userCodeMap } 
 import { getSessionId, getSession, generateSessionId, createDeviceSession, generateUserCode, saveSession } from '../utils/session';
 import { generateRandomString, sha256Base64Url } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';
+import { corsFor } from '../utils/cors';
 import { initiateUpstreamOAuth } from './oauth-upstream';
 
 export async function handleLocalOAuth(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
   const url = new URL(request.url);
+  const origin = request.headers.get('Origin');
+  
+  // Handle OPTIONS preflight for all OAuth endpoints
+  if (request.method === 'OPTIONS') {
+    // For /oauth/register and /oauth/token, use specific CORS
+    if (url.pathname === '/oauth/register' || url.pathname === '/oauth/token') {
+      return new Response(null, {
+        status: 204,
+        headers: corsFor(origin)
+      });
+    }
+    // For other OAuth endpoints, use standard CORS
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Vary': 'Origin'
+      }
+    });
+  }
   
   if (url.pathname === '/oauth/authorize') {
     if (request.method === 'GET') return handleLocalOAuthAuthorize(request, hostRoute, env);
@@ -215,6 +238,7 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
 }
 
 async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  const origin = request.headers.get('Origin');
   const formData = await request.formData();
   const grant_type = formData.get('grant_type');
   
@@ -318,7 +342,11 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     console.log(`╚══════════════════════════════════════════════════════`);
     
     return new Response(JSON.stringify(tokenResponse), {
-      headers: { 'Content-Type': 'application/json' }
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        ...corsFor(origin)
+      }
     });
   }
   
@@ -360,7 +388,10 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
   
   return new Response(JSON.stringify({ error: 'unsupported_grant_type' }), {
     status: 400,
-    headers: { 'Content-Type': 'application/json' }
+    headers: {
+      'Content-Type': 'application/json',
+      ...corsFor(origin)
+    }
   });
 }
 
@@ -488,23 +519,56 @@ async function handleDeviceVerifyPost(request: Request, hostRoute: MCPRouteInfo,
 }
 
 async function handleClientRegistration(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
-  const body = await request.json() as any;
+  const origin = request.headers.get('Origin');
   
-  // Simple static registration - return same client_id
-  const response = {
-    client_id: body.client_name || 'mcp-client',
-    client_name: body.client_name,
-    redirect_uris: body.redirect_uris,
-    grant_types: ['authorization_code', 'refresh_token'],
-    response_types: ['code'],
-    token_endpoint_auth_method: 'none',
-    scope: 'mcp read write'
-  };
-  
-  return new Response(JSON.stringify(response), {
-    headers: { 'Content-Type': 'application/json' },
-    status: 201
-  });
+  try {
+    const body = await request.json() as any;
+    const currentDomain = getCurrentDomain(request);
+    
+    // Generate a unique client_id
+    const client_id = `mcp_${generateRandomString(12)}`;
+    
+    // RFC 7591 compliant response
+    const response = {
+      client_id,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      client_name: body.client_name || 'MCP Client',
+      redirect_uris: body.redirect_uris || [`https://${currentDomain}/oauth/callback`],
+      grant_types: body.grant_types || ['authorization_code', 'refresh_token'],
+      response_types: body.response_types || ['code'],
+      token_endpoint_auth_method: body.token_endpoint_auth_method || 'none',
+      scope: body.scope || 'mcp read write',
+      // Optional fields for completeness
+      client_secret_expires_at: 0,  // Never expires
+      registration_access_token: `reg_${generateRandomString(32)}`,
+      registration_client_uri: `https://${currentDomain}/oauth/register/${client_id}`
+    };
+    
+    // Store client registration if needed (for now, we're stateless)
+    console.log(`Client registered: ${client_id} from origin: ${origin}`);
+    
+    return new Response(JSON.stringify(response), {
+      status: 201,
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        ...corsFor(origin)
+      }
+    });
+  } catch (error) {
+    console.error('Client registration error:', error);
+    return new Response(JSON.stringify({ 
+      error: 'invalid_client_metadata',
+      error_description: 'Failed to process client registration'
+    }), {
+      status: 400,
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        ...corsFor(origin)
+      }
+    });
+  }
 }
 
 async function handleOAuthCallback(request: Request, env: Env): Promise<Response> {
