@@ -387,8 +387,17 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
     }
   });
   
-  // Only add upstream auth if we have tokens
+  // Check if token needs refresh before using it
   if (useUpstreamAuth && serverData?.tokens) {
+    // Proactively refresh token if it's expired or about to expire (within 5 minutes)
+    if (isTokenExpired(serverData.expiresAt, 300)) {
+      console.log(`Token expired or expiring soon for ${hostRoute.serverDomain}, attempting refresh...`);
+      const refreshed = await refreshUpstreamToken(hostRoute.serverDomain, serverData, env);
+      if (!refreshed) {
+        console.error(`Failed to refresh token for ${hostRoute.serverDomain}`);
+        // Continue with expired token, will get 401 and retry
+      }
+    }
     upstreamHeaders['Authorization'] = `Bearer ${serverData.tokens.access_token}`;
   }
   upstreamHeaders['Host'] = hostRoute.upstreamBase.hostname;
@@ -1679,6 +1688,12 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
     console.error('Token exchange error:', error);
     return new Response('Token exchange failed', { status: 500 });
   }
+}
+
+// Helper function to check if a token is expired or about to expire
+function isTokenExpired(expiresAt: number | undefined, bufferSeconds: number = 300): boolean {
+  if (!expiresAt) return true; // If no expiration time, consider it expired
+  return Date.now() > (expiresAt - bufferSeconds * 1000); // Check if expired or expires within buffer
 }
 
 async function refreshUpstreamToken(serverDomain: string, serverData: any, env: Env): Promise<boolean> {
