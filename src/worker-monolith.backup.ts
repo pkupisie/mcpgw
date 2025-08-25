@@ -972,6 +972,14 @@ export async function handleLocalOAuthAuthorize(request: Request, hostRoute: MCP
   const code_challenge_method = params.get('code_challenge_method');
   const resource = params.get('resource'); // RFC 8707 resource parameter
   
+  // Log OAuth authorization request
+  console.log(`\n╔══ OAUTH AUTHORIZE REQUEST ══════════════════════════`);
+  console.log(`║ Client ID: ${client_id}`);
+  console.log(`║ Requested Scope: ${scope}`);
+  console.log(`║ Resource: ${resource || 'none'}`);
+  console.log(`║ Redirect URI: ${redirect_uri}`);
+  console.log(`╚══════════════════════════════════════════════════════`)
+  
   // Validate required parameters
   if (response_type !== 'code') {
     return new Response('Only authorization code flow is supported', { status: 400 });
@@ -1176,6 +1184,16 @@ export async function handleLocalOAuthToken(request: Request, hostRoute: MCPRout
       expires_in,
       scope: codeData.scope
     };
+    
+    // Scope drift detection
+    const requestedScope = codeData.scope;
+    const issuedScope = codeData.scope; // In this case they're the same, but this is where transformation would happen
+    if (requestedScope !== issuedScope) {
+      console.warn(`\n╔══ SCOPE DRIFT DETECTED ═════════════════════════════`);
+      console.warn(`║ Requested: ${requestedScope}`);
+      console.warn(`║ Issued: ${issuedScope}`);
+      console.warn(`╚══════════════════════════════════════════════════════`);
+    }
     
     // Enhanced token issuance logging
     const expiresAt = new Date(Date.now() + expires_in * 1000);

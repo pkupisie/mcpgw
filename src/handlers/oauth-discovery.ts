@@ -32,7 +32,7 @@ export async function handleOAuthDiscovery(request: Request, hostRoute: MCPRoute
     authorization_response_iss_parameter_supported: true,
     backchannel_logout_supported: false,
     frontchannel_logout_supported: false,
-    scopes_supported: ['read', 'write', 'admin']
+    scopes_supported: ['mcp', 'read', 'write']
   };
   
   console.log(`\n╔══ OAUTH DISCOVERY RESPONSE ═════════════════════════`);
@@ -57,11 +57,22 @@ export async function handleProtectedResourceMetadata(request: Request, hostRout
   const metadata = {
     resource,
     authorization_servers: [`https://${currentDomain}`],
-    bearer_methods_supported: ['header'],
-    resource_signing_alg_values_supported: ['RS256'],
-    resource_documentation: 'https://modelcontextprotocol.io/docs',
-    resource_policy_uri: 'https://modelcontextprotocol.io/privacy',
-    resource_tos_uri: 'https://modelcontextprotocol.io/terms'
+    scopes_supported: ['mcp', 'read', 'write'],
+    bearer_methods_supported: ['authorization_header'],
+    sse_endpoint: '/sse',
+    resource_documentation: `https://${currentDomain}`,
+    
+    // Explicitly indicate that authentication is required
+    authentication_required: true,
+    
+    // MCP-specific metadata
+    mcp_version: '1.0',
+    upstream_server: hostRoute.serverDomain,
+    capabilities: ['tools', 'resources', 'prompts'],
+    
+    // Server identification for Claude
+    server_name: `${hostRoute.serverDomain} (via MCP Gateway)`,
+    server_description: 'MCP OAuth Gateway proxying to upstream server'
   };
   
   console.log(`\n╔══ PROTECTED RESOURCE METADATA ══════════════════════`);
