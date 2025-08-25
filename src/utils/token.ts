@@ -3,6 +3,7 @@
  */
 
 import type { SessionData, MCPServerConfig, Env } from '../types';
+import { saveSession, getSessionId } from './session';
 
 // Check if token is expired with optional buffer
 export function isTokenExpired(serverOAuth: any, bufferSeconds: number = 300): boolean {
@@ -11,7 +12,7 @@ export function isTokenExpired(serverOAuth: any, bufferSeconds: number = 300): b
 }
 
 // Refresh upstream OAuth token
-export async function refreshUpstreamToken(serverDomain: string, session: SessionData, env: Env): Promise<boolean> {
+export async function refreshUpstreamToken(serverDomain: string, session: SessionData, env: Env, sessionId?: string): Promise<boolean> {
   const serverData = session.oauth?.[serverDomain];
   
   if (!serverData?.tokens?.refresh_token) {
@@ -75,6 +76,12 @@ export async function refreshUpstreamToken(serverDomain: string, session: Sessio
     }
     
     console.log(`Successfully refreshed token for ${serverDomain}`);
+    
+    // Save updated session if sessionId provided
+    if (sessionId) {
+      await saveSession(sessionId, session, env);
+    }
+    
     return true;
   } catch (error) {
     console.error(`Failed to refresh token: ${error}`);

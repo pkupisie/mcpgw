@@ -99,4 +99,5 @@ export interface Env {
   LOCAL_PASSWORD: string;
   MCP_SERVERS: string;
   OAUTH_CODES: KVNamespace;
+  SESSIONS: KVNamespace;
 }

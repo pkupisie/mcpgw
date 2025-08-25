@@ -54,7 +54,7 @@ export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo
   // Check if upstream token needs refresh
   if (isTokenExpired(serverOAuth)) {
     console.log('Upstream token expired, attempting refresh...');
-    const refreshed = await refreshUpstreamToken(hostRoute.serverDomain, session, env);
+    const refreshed = await refreshUpstreamToken(hostRoute.serverDomain, session, env, tokenData.sessionId);
     if (!refreshed) {
       console.log('Failed to refresh upstream token');
       return new Response('Failed to refresh upstream authentication', { status: 401 });

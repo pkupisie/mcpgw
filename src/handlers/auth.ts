@@ -4,7 +4,7 @@
 
 import type { Env, SessionData } from '../types';
 import { sessions } from '../stores';
-import { generateSessionId } from '../utils/session';
+import { generateSessionId, saveSession } from '../utils/session';
 import { generateRandomString } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';
 
@@ -52,10 +52,11 @@ export async function handleLogin(request: Request, env: Env): Promise<Response>
     oauth: {}
   };
   
-  sessions.set(sessionId, session);
+  // Save session to KV and memory
+  await saveSession(sessionId, session, env);
   
   console.log(`║ Session Created: ${sessionId.substring(0, 8)}...`);
-  console.log(`║ Total Sessions: ${sessions.size}`);
+  console.log(`║ Total Sessions in Memory: ${sessions.size}`);
   
   // Clean up old sessions periodically (simple memory management)
   if (sessions.size > 1000) {

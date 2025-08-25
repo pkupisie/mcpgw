@@ -4,7 +4,7 @@
 
 import type { Env, MCPServerConfig, MCPRouteInfo, SessionData } from '../types';
 import { sessions } from '../stores';
-import { getSessionId, getSession } from '../utils/session';
+import { getSessionId, getSession, saveSession } from '../utils/session';
 import { generateRandomString, sha256Base64Url } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';
 import { isTokenExpired } from '../utils/token';
@@ -49,6 +49,9 @@ export async function handleOAuthStart(request: Request, env: Env): Promise<Resp
     state,
     pkceVerifier
   };
+  
+  // Save updated session to KV
+  await saveSession(sessionId!, session, env);
   
   // Build authorization URL
   const authUrl = new URL(serverConfig.authzEndpoint);
@@ -164,6 +167,9 @@ export async function handleOAuthCallback(request: Request, env: Env): Promise<R
   delete serverData.state;
   delete serverData.pkceVerifier;
   
+  // Save updated session to KV
+  await saveSession(sessionId!, session, env);
+  
   console.log(`Successfully authenticated with ${serverDomain}`);
   
   // Redirect to dashboard or pending resource
@@ -201,6 +207,12 @@ export async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRout
     state,
     pkceVerifier
   };
+  
+  // Get session ID from request to save
+  const sessionId = getSessionId(request);
+  if (sessionId) {
+    await saveSession(sessionId, session, env);
+  }
   
   // Build authorization URL
   const authUrl = new URL(serverConfig.authzEndpoint);

@@ -4,7 +4,7 @@
 
 import type { Env, MCPRouteInfo, SessionData } from '../types';
 import { sessions, authorizationCodes, accessTokens, deviceCodes, userCodeMap } from '../stores';
-import { getSessionId, getSession, generateSessionId, createDeviceSession, generateUserCode } from '../utils/session';
+import { getSessionId, getSession, generateSessionId, createDeviceSession, generateUserCode, saveSession } from '../utils/session';
 import { generateRandomString, sha256Base64Url } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';
 import { initiateUpstreamOAuth } from './oauth-upstream';
@@ -166,6 +166,9 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
       resource: formData.get('resource') as string,
       serverDomain: hostRoute.serverDomain
     };
+    
+    // Save session before redirecting
+    await saveSession(sessionId!, session, env);
     
     // Redirect to upstream OAuth
     return initiateUpstreamOAuth(request, hostRoute, session, env);
