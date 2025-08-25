@@ -145,7 +145,8 @@ export default {
           return handleOAuthDiscovery(request, hostRoute, env);
         }
         
-        if (url.pathname === '/.well-known/oauth-protected-resource') {
+        if (url.pathname === '/.well-known/oauth-protected-resource' || 
+            url.pathname === '/.well-known/oauth-protected-resource/sse') {
           return handleProtectedResourceMetadata(request, hostRoute, env);
         }
         
@@ -267,6 +268,12 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
     } else {
       // Require authentication for ALL MCP data endpoints including SSE
       console.log(`Requiring authentication for MCP endpoint: ${url.pathname}`);
+      
+      // Use different WWW-Authenticate format for /sse vs other endpoints
+      const wwwAuthHeader = url.pathname === '/sse' 
+        ? 'Bearer realm="mcp", scope="mcp read write"'
+        : 'Bearer realm="OAuth", error="invalid_token", error_description="Missing or invalid access token"';
+      
       return new Response(JSON.stringify({ 
         error: 'invalid_token',
         error_description: 'Missing or invalid access token'
@@ -274,7 +281,7 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
         status: 401,
         headers: { 
           'Content-Type': 'application/json',
-          'WWW-Authenticate': 'Bearer realm="OAuth", error="invalid_token", error_description="Missing or invalid access token"'
+          'WWW-Authenticate': wwwAuthHeader
         }
       });
     }
@@ -1067,7 +1074,10 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     console.log(`Sending token response to Claude:`, JSON.stringify(tokenResponse, null, 2));
     
     return new Response(JSON.stringify(tokenResponse), {
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store'
+      }
     });
   }
   
@@ -1108,7 +1118,10 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       token_type: 'Bearer',
       expires_in
     }), {
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store'
+      }
     });
   }
   
@@ -1198,7 +1211,10 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       expires_in,
       scope: deviceData.scope
     }), {
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store'
+      }
     });
   }
   
