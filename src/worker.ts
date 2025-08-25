@@ -265,19 +265,64 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
       console.log(`Allowing unauthenticated access to public endpoint: ${url.pathname}`);
       // Continue to normal handling - these should be handled above this point
     } else {
-      // Require authentication for actual MCP data endpoints
-      console.log(`Requiring authentication for MCP data endpoint: ${url.pathname}`);
+      // Require authentication for ALL MCP data endpoints including SSE
+      console.log(`Requiring authentication for MCP endpoint: ${url.pathname}`);
       return new Response(JSON.stringify({ 
-        error: 'authentication_required',
-        error_description: 'OAuth authentication is required for MCP data access',
-        authUrl: `https://${getCurrentDomain(request)}/oauth/start?server=${encodeURIComponent(hostRoute.serverDomain)}`
+        error: 'invalid_token',
+        error_description: 'Missing or invalid access token'
       }), { 
         status: 401,
         headers: { 
           'Content-Type': 'application/json',
-          'WWW-Authenticate': 'Bearer realm="MCP Gateway"'
+          'WWW-Authenticate': 'Bearer realm="OAuth", error="invalid_token", error_description="Missing or invalid access token"'
         }
       });
+    }
+  }
+  
+  // Handle authenticated MCP clients accessing SSE
+  if (mcpProtocolVersion && authHeader && authHeader.startsWith('Bearer ')) {
+    const url = new URL(request.url);
+    
+    if (url.pathname === '/sse') {
+      // HEAD request for SSE discovery
+      if (request.method === 'HEAD') {
+        console.log('Authenticated MCP SSE discovery HEAD request');
+        return new Response(null, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization, MCP-Protocol-Version',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS'
+          }
+        });
+      }
+      
+      // GET request for SSE stream
+      if (request.method === 'GET') {
+        console.log('Authenticated MCP SSE stream GET request');
+        // Validate the token first
+        const localToken = authHeader.slice(7);
+        const tokenData = accessTokens.get(localToken);
+        
+        if (!tokenData || tokenData.expires_at < Date.now()) {
+          return new Response(JSON.stringify({ 
+            error: 'invalid_token',
+            error_description: 'Invalid or expired token'
+          }), { 
+            status: 401,
+            headers: { 
+              'Content-Type': 'application/json',
+              'WWW-Authenticate': 'Bearer error="invalid_token"'
+            }
+          });
+        }
+        
+        return handleMCPSSE(request, hostRoute, env);
+      }
     }
   }
   
@@ -648,6 +693,116 @@ async function handleProtectedResourceMetadata(request: Request, hostRoute: MCPR
       'Cache-Control': 'max-age=3600'
     }
   });
+}
+
+// MCP SSE Handler
+async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  console.log(`Setting up MCP SSE stream for ${hostRoute.serverDomain}`);
+  
+  // Create a TransformStream for SSE
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+  
+  // Start the SSE stream
+  const streamPromise = (async () => {
+    try {
+      // Send initial connection message
+      await writer.write(encoder.encode(': ping\n\n'));
+      
+      // Send MCP initialize response
+      const initResponse = {
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+          protocolVersion: '2025-06-18',
+          capabilities: {
+            tools: {},
+            resources: {},
+            prompts: {}
+          },
+          serverInfo: {
+            name: `MCP Gateway for ${hostRoute.serverDomain}`,
+            version: '1.0.0'
+          }
+        }
+      };
+      
+      await writer.write(encoder.encode(`data: ${JSON.stringify(initResponse)}\n\n`));
+      
+      // Try to connect to upstream MCP SSE if available
+      const upstreamSSE = await tryConnectUpstreamSSE(hostRoute, env);
+      
+      if (upstreamSSE) {
+        // Proxy upstream SSE events
+        const reader = upstreamSSE.getReader();
+        const decoder = new TextDecoder();
+        
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          const chunk = decoder.decode(value, { stream: true });
+          await writer.write(encoder.encode(chunk));
+        }
+      } else {
+        // No upstream SSE, keep connection alive with heartbeats
+        const heartbeatInterval = setInterval(async () => {
+          try {
+            await writer.write(encoder.encode(': ping\n\n'));
+          } catch (error) {
+            clearInterval(heartbeatInterval);
+          }
+        }, 30000); // 30 second heartbeat
+        
+        // Clean up on connection close
+        request.signal.addEventListener('abort', () => {
+          clearInterval(heartbeatInterval);
+          writer.close();
+        });
+      }
+    } catch (error) {
+      console.error('SSE stream error:', error);
+      await writer.close();
+    }
+  })();
+  
+  // Return SSE response
+  return new Response(readable, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, MCP-Protocol-Version',
+      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+      'X-Accel-Buffering': 'no' // Disable buffering for SSE
+    }
+  });
+}
+
+// Try to connect to upstream MCP SSE endpoint
+async function tryConnectUpstreamSSE(hostRoute: MCPRouteInfo, env: Env): Promise<ReadableStream | null> {
+  try {
+    const upstreamUrl = new URL(hostRoute.upstreamBase);
+    upstreamUrl.pathname = '/sse';
+    
+    const response = await fetch(upstreamUrl.toString(), {
+      headers: {
+        'Accept': 'text/event-stream',
+        'MCP-Protocol-Version': '2025-06-18'
+      }
+    });
+    
+    if (response.ok && response.body) {
+      console.log(`Connected to upstream SSE at ${upstreamUrl.toString()}`);
+      return response.body;
+    }
+  } catch (error) {
+    console.log(`No upstream SSE available for ${hostRoute.serverDomain}:`, error);
+  }
+  
+  return null;
 }
 
 async function handleLocalOAuth(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
