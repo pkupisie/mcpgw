@@ -176,8 +176,12 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
   
   // Check if we have upstream tokens for this server
   console.log(`║ Checking upstream tokens for: ${hostRoute.serverDomain}`);
+  console.log(`║ Session OAuth data:`, JSON.stringify(session.oauth || {}));
   const upstreamTokens = session.oauth?.[hostRoute.serverDomain]?.tokens;
   console.log(`║ Upstream tokens exist: ${upstreamTokens ? 'Yes' : 'No'}`);
+  if (upstreamTokens) {
+    console.log(`║ Token details: access_token=${upstreamTokens.access_token?.substring(0, 8)}...`);
+  }
   
   if (!upstreamTokens) {
     console.log(`║ No upstream tokens found - initiating upstream OAuth`);
