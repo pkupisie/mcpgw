@@ -25,6 +25,7 @@ interface MCPServerConfig {
 interface SessionData {
   csrf: string;
   localAuth: boolean;
+  pendingResource?: string;
   oauth?: {
     [serverDomain: string]: {
       state?: string;
@@ -114,6 +115,24 @@ interface Env {
   MCP_SERVERS: string;
   OAUTH_CODES: KVNamespace;
 }
+
+// Logging utilities
+function generateRequestId(): string {
+  return crypto.randomUUID();
+}
+
+// Structured logging helper
+function log(data: any) {
+  console.log(JSON.stringify(data));
+}
+
+// Summary line logging
+function logSummary(endpoint: string, method: string, status: number, details: string) {
+  console.log(`SUM ${endpoint} ${method} ${status} ${details}`);
+}
+
+// Request correlation tracking
+const requestCorrelation = new Map<string, string>();
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -319,8 +338,145 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
     }
   }
   
-  // Handle authenticated clients accessing SSE (with or without MCP protocol header)
-  // Claude might not send mcp-protocol-version header after OAuth flow completes
+  // Enhanced SSE handling with detailed logging
+  if (url.pathname === '/sse') {
+    const reqId = generateRequestId();
+    const auth = request.headers.get('Authorization') ?? '';
+    const hasAuth = !!auth;
+    const isBearer = auth.startsWith('Bearer ');
+    const token = isBearer ? auth.slice(7) : '';
+    const tokenSnip = token ? token.slice(0, 8) : '';
+    const acceptEncoding = request.headers.get('accept-encoding') ?? '';
+    const compressionEnabled = acceptEncoding.includes('gzip') || acceptEncoding.includes('br');
+    
+    // Log SSE request details
+    log({
+      kind: 'sse_request',
+      req_id: reqId,
+      method: request.method,
+      path: url.pathname,
+      auth_present: hasAuth,
+      bearer_prefix_ok: isBearer,
+      token_snip: tokenSnip,
+      ua: request.headers.get('User-Agent'),
+      mcp_version: mcpProtocolVersion,
+      compression_requested: compressionEnabled
+    });
+    
+    // Check if no auth provided
+    if (!isBearer) {
+      const reason = !hasAuth ? 'missing_auth' : 'invalid_auth_format';
+      const headers = {
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': 'Bearer realm="mcp", scope="mcp read write"',
+        'X-Request-Id': reqId // Include request ID for correlation
+      };
+      
+      // Store request ID for later correlation
+      requestCorrelation.set(hostname, reqId);
+      
+      log({
+        kind: 'sse_response',
+        req_id: reqId,
+        status: 401,
+        challenge_header_set: true,
+        reason
+      });
+      
+      logSummary('/sse', request.method, 401, `hasAuth=${hasAuth} reason=${reason} req=${reqId.slice(0, 8)}`);
+      
+      return new Response(JSON.stringify({ 
+        error: 'invalid_token',
+        error_description: reason
+      }), { 
+        status: 401,
+        headers
+      });
+    }
+    
+    // Validate token
+    const tokenData = accessTokens.get(token);
+    const tokenValid = tokenData && tokenData.expires_at > Date.now();
+    const validationReason = !tokenData ? 'token_not_found' : 
+                            tokenData.expires_at < Date.now() ? 'token_expired' : 
+                            'valid';
+    
+    log({
+      kind: 'token_validation',
+      req_id: reqId,
+      ok: tokenValid,
+      reason: validationReason,
+      scopes: tokenData?.scope?.split(' '),
+      exp: tokenData ? new Date(tokenData.expires_at).toISOString() : null,
+      client_id: tokenData?.client_id
+    });
+    
+    if (!tokenValid) {
+      const headers = {
+        'Content-Type': 'application/json',
+        'WWW-Authenticate': 'Bearer error="invalid_token"',
+      };
+      
+      log({
+        kind: 'sse_response',
+        req_id: reqId,
+        status: 401,
+        challenge_header_set: true,
+        reason: validationReason
+      });
+      
+      logSummary('/sse', request.method, 401, `token_invalid reason=${validationReason} req=${reqId.slice(0, 8)}`);
+      
+      return new Response(JSON.stringify({ 
+        error: 'invalid_token',
+        error_description: validationReason
+      }), { 
+        status: 401,
+        headers
+      });
+    }
+    
+    // Token is valid - handle HEAD or GET
+    if (request.method === 'HEAD') {
+      const headers = {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, MCP-Protocol-Version',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS'
+      };
+      
+      log({
+        kind: 'sse_response',
+        req_id: reqId,
+        status: 200,
+        content_type: headers['Content-Type'],
+        cache_control: headers['Cache-Control'],
+        compression_enabled: false // We don't compress HEAD responses
+      });
+      
+      logSummary('/sse', 'HEAD', 200, `authenticated token_snip=${tokenSnip} req=${reqId.slice(0, 8)}`);
+      
+      return new Response(null, { status: 200, headers });
+    }
+    
+    if (request.method === 'GET') {
+      log({
+        kind: 'sse_stream_starting',
+        req_id: reqId,
+        client_id: tokenData.client_id,
+        scopes: tokenData.scope
+      });
+      
+      logSummary('/sse', 'GET', 200, `stream_established token_snip=${tokenSnip} req=${reqId.slice(0, 8)}`);
+      
+      // Pass request ID to SSE handler for correlation
+      return handleMCPSSE(request, hostRoute, env, reqId);
+    }
+  }
+  
+  // Handle authenticated clients for non-SSE endpoints
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const url = new URL(request.url);
     
@@ -330,48 +486,6 @@ async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: 
     console.log(`║ MCP Protocol: ${mcpProtocolVersion || 'NOT SENT (possible issue)'}`);
     console.log(`║ Bearer Token: ${authHeader.slice(7, 20)}...`);
     console.log(`╚════════════════════════════════════════════════════`);
-    
-    if (url.pathname === '/sse') {
-      // HEAD request for SSE discovery
-      if (request.method === 'HEAD') {
-        console.log('Processing authenticated SSE discovery HEAD request');
-        return new Response(null, {
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization, MCP-Protocol-Version',
-            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS'
-          }
-        });
-      }
-      
-      // GET request for SSE stream
-      if (request.method === 'GET') {
-        console.log('Processing authenticated SSE stream GET request');
-        // Validate the token first
-        const localToken = authHeader.slice(7);
-        const tokenData = accessTokens.get(localToken);
-        
-        if (!tokenData || tokenData.expires_at < Date.now()) {
-          return new Response(JSON.stringify({ 
-            error: 'invalid_token',
-            error_description: 'Invalid or expired token'
-          }), { 
-            status: 401,
-            headers: { 
-              'Content-Type': 'application/json',
-              'WWW-Authenticate': 'Bearer error="invalid_token"'
-            }
-          });
-        }
-        
-        return handleMCPSSE(request, hostRoute, env);
-      }
-    }
-  }
   
   // Removed public proxy mode - now requiring authentication for all MCP clients
   
@@ -755,6 +869,15 @@ async function handleProtectedResourceMetadata(request: Request, hostRoute: MCPR
     description: `MCP OAuth Gateway proxying requests to ${hostRoute.serverDomain}`
   };
   
+  // Log the protected resource metadata
+  log({
+    kind: 'well_known_protected_resource',
+    path: request.url,
+    body: metadata
+  });
+  
+  logSummary('/.well-known/oauth-protected-resource', 'GET', 200, `bearer_methods=${metadata.bearer_methods_supported.join(',')}`);
+  
   return new Response(JSON.stringify(metadata, null, 2), {
     headers: { 
       'Content-Type': 'application/json',
@@ -767,7 +890,7 @@ async function handleProtectedResourceMetadata(request: Request, hostRoute: MCPR
 }
 
 // MCP SSE Handler
-async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env, reqId?: string): Promise<Response> {
   console.log(`\n╔══ SSE STREAM ESTABLISHED ══════════════════════════════`);
   console.log(`║ Downstream: Claude → Gateway (authenticated)`);
   console.log(`║ Upstream: Gateway → ${hostRoute.serverDomain}`);
@@ -1033,7 +1156,8 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
     resource: formData.get('resource') as string, // RFC 8707 resource parameter
     domain: hostname,
     sessionId: sessionId!,
-    expires_at: Date.now() + 600000 // 10 minutes
+    expires_at: Date.now() + 600000, // 10 minutes
+    req_id_from_probe: requestCorrelation.get(hostname) || undefined // Correlate with original SSE probe
   };
   
   // Store code in KV with TTL for automatic expiration
@@ -1135,6 +1259,23 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       expires_in,
       scope: codeData.scope
     };
+    
+    // Enhanced token issuance logging
+    const expiresAt = new Date(Date.now() + expires_in * 1000);
+    log({
+      kind: 'token_issued',
+      grant_type: 'authorization_code',
+      client_id: codeData.client_id,
+      access_token_snip: access_token.slice(0, 8),
+      scopes_issued: codeData.scope.split(' '),
+      audience: codeData.resource || null,
+      expires_at: expiresAt.toISOString(),
+      cache_control_set: true,
+      correlates_req_id: codeData.req_id_from_probe || null
+    });
+    
+    logSummary('/oauth/token', 'POST', 200, 
+      `snip=${access_token.slice(0, 8)} scopes=${codeData.scope} exp=${expiresAt.toISOString()}`);
     
     console.log(`║ Token Response:`, JSON.stringify(tokenResponse, null, 2));
     console.log(`╚══════════════════════════════════════════════════════`);
@@ -1612,12 +1753,41 @@ async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRouteInfo, 
   authUrl.searchParams.set('code_challenge', challenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
   
-  // Set scopes - use first available scope or 'openid' as fallback
-  const scope = upstreamOAuth.scopes_supported?.[0] || 'openid';
+  // Align scopes with what downstream clients request
+  // If upstream supports the exact scopes, use them; otherwise map appropriately
+  const requestedScopes = ['mcp', 'read', 'write'];
+  const supportedScopes = upstreamOAuth.scopes_supported || [];
+  let scopesToRequest = requestedScopes.filter(s => supportedScopes.includes(s));
+  
+  // If no matching scopes, fall back to all supported scopes or 'openid'
+  if (scopesToRequest.length === 0) {
+    scopesToRequest = supportedScopes.length > 0 ? supportedScopes : ['openid'];
+  }
+  
+  const scope = scopesToRequest.join(' ');
   authUrl.searchParams.set('scope', scope);
   
-  console.log(`Using client_id: ${clientCredentials.client_id} for upstream OAuth to ${hostRoute.serverDomain}`);
-  console.log(`Authorization URL: ${authUrl.toString()}`);
+  // Add resource parameter if we're tracking one
+  const pendingResource = session.pendingResource || `https://${hostRoute.serverDomain}`;
+  if (pendingResource) {
+    authUrl.searchParams.set('resource', pendingResource);
+    session.pendingResource = pendingResource; // Store for token exchange
+  }
+  
+  // Enhanced logging for upstream OAuth
+  log({
+    kind: 'upstream_oauth_authorize',
+    server: hostRoute.serverDomain,
+    client_id: clientCredentials.client_id,
+    redirect_uri: redirectUri,
+    scopes_requested: scopesToRequest,
+    resource: pendingResource || null,
+    has_pkce: true,
+    authorization_url: authUrl.toString()
+  });
+  
+  logSummary('/oauth/start', 'GET', 302, 
+    `upstream=${hostRoute.serverDomain} scopes=${scope} resource=${pendingResource ? 'yes' : 'no'}`);
   
   return Response.redirect(authUrl.toString(), 302);
 }
@@ -1779,6 +1949,26 @@ async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
   authUrl.searchParams.set('code_challenge', challenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
   
+  // Add resource parameter for pre-configured servers
+  const resource = `https://${serverDomain}`;
+  authUrl.searchParams.set('resource', resource);
+  session.pendingResource = resource;
+  
+  // Log upstream OAuth for pre-configured server
+  log({
+    kind: 'upstream_oauth_authorize',
+    server: serverDomain,
+    client_id: serverConfig.clientId,
+    redirect_uri: `https://${getCurrentDomain(request)}/oauth/callback`,
+    scopes_requested: serverConfig.scopes.split(' '),
+    resource: resource,
+    has_pkce: true,
+    authorization_url: authUrl.toString()
+  });
+  
+  logSummary('/oauth/start', 'GET', 302, 
+    `upstream=${serverDomain} scopes=${serverConfig.scopes} resource=yes`);
+  
   return Response.redirect(authUrl.toString(), 302);
 }
 
@@ -1843,35 +2033,91 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   tokenRequestBody.append('client_id', clientCredentials.client_id);
   tokenRequestBody.append('code_verifier', oauthData.pkceVerifier);
   
+  // Add resource parameter if we stored one
+  if (session.pendingResource) {
+    tokenRequestBody.append('resource', session.pendingResource);
+  }
+  
   if (clientCredentials.client_secret) {
     tokenRequestBody.append('client_secret', clientCredentials.client_secret);
   }
+  
+  // Log token exchange request
+  log({
+    kind: 'upstream_oauth_token_request',
+    server: serverDomain,
+    grant_type: 'authorization_code',
+    client_id: clientCredentials.client_id,
+    has_code_verifier: true,
+    has_resource: !!session.pendingResource,
+    resource: session.pendingResource || null
+  });
   
   try {
     const tokenResponse = await fetch(upstreamOAuth.token_endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache'
       },
       body: tokenRequestBody.toString()
     });
     
     if (!tokenResponse.ok) {
       const errorText = await tokenResponse.text();
+      log({
+        kind: 'upstream_oauth_token_error',
+        server: serverDomain,
+        status: tokenResponse.status,
+        error: errorText
+      });
       console.error('Token exchange failed:', errorText);
       return new Response(`Token exchange failed: ${tokenResponse.status}`, { status: 400 });
     }
     
     const tokenData = await tokenResponse.json() as any;
     
+    // Parse JWT to extract audience if it's a JWT
+    let audience = null;
+    let scopes = tokenData.scope || null;
+    if (tokenData.access_token && tokenData.access_token.includes('.')) {
+      try {
+        const [, payload] = tokenData.access_token.split('.');
+        const decoded = JSON.parse(atob(payload));
+        audience = decoded.aud || null;
+        scopes = decoded.scope || scopes;
+      } catch (e) {
+        // Not a JWT or malformed, ignore
+      }
+    }
+    
+    // Check for refresh token rotation
+    const refreshTokenRotated = tokenData.refresh_token && 
+                              tokenData.refresh_token !== oauthData.tokens?.refresh_token;
+    
+    // Log successful token response
+    log({
+      kind: 'upstream_oauth_token_response',
+      server: serverDomain,
+      access_token_snip: tokenData.access_token.slice(0, 8),
+      scopes_granted: scopes ? scopes.split(' ') : null,
+      audience: audience,
+      has_refresh_token: !!tokenData.refresh_token,
+      refresh_token_rotated: refreshTokenRotated,
+      expires_in: tokenData.expires_in || 3600
+    });
+    
     // Store tokens
     oauthData.tokens = {
       access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
+      refresh_token: tokenData.refresh_token || oauthData.tokens?.refresh_token, // Keep old if not rotated
       expires_in: tokenData.expires_in || 3600
     };
     oauthData.expiresAt = Date.now() + (tokenData.expires_in || 3600) * 1000;
+    
+    logSummary('/oauth/callback', 'GET', 200, 
+      `upstream=${serverDomain} token_obtained scopes=${scopes || 'unknown'} aud=${audience || 'none'}`);
     
     // Clear PKCE data
     delete oauthData.state;
@@ -1894,7 +2140,8 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
         resource: pendingAuth.resource,
         domain: getCurrentDomain(request), // Should be the encoded hostname
         sessionId: sessionId!,
-        expires_at: Date.now() + 600000 // 10 minutes
+        expires_at: Date.now() + 600000, // 10 minutes
+        req_id_from_probe: requestCorrelation.get(getCurrentDomain(request)) || undefined // Correlate with original SSE probe
       };
       
       // Store code in KV with TTL for automatic expiration
@@ -1939,8 +2186,15 @@ function isTokenExpired(expiresAt: number | undefined, bufferSeconds: number = 3
 
 async function refreshUpstreamToken(serverDomain: string, serverData: any, env: Env): Promise<boolean> {
   if (!serverData.tokens?.refresh_token) {
+    log({
+      kind: 'upstream_refresh_skip',
+      server: serverDomain,
+      reason: 'no_refresh_token'
+    });
     return false;
   }
+  
+  const oldRefreshToken = serverData.tokens.refresh_token;
   
   // Get server config
   let mcpServers: MCPServerConfig[] = [];
@@ -1953,36 +2207,154 @@ async function refreshUpstreamToken(serverDomain: string, serverData: any, env: 
   
   const serverConfig = mcpServers.find(s => s.domain === serverDomain);
   if (!serverConfig) {
-    console.error('Server config not found for:', serverDomain);
-    return false;
+    // Try dynamic discovery for token endpoint
+    const upstreamOAuth = await discoverUpstreamOAuth(serverDomain);
+    if (!upstreamOAuth?.token_endpoint) {
+      log({
+        kind: 'upstream_refresh_error',
+        server: serverDomain,
+        reason: 'config_not_found'
+      });
+      return false;
+    }
+    
+    // Use discovered endpoint with registered client
+    const clientCredentials = registeredClients.get(serverDomain);
+    if (!clientCredentials) {
+      log({
+        kind: 'upstream_refresh_error',
+        server: serverDomain,
+        reason: 'no_registered_client'
+      });
+      return false;
+    }
+    
+    const refreshRequestBody = new URLSearchParams();
+    refreshRequestBody.append('grant_type', 'refresh_token');
+    refreshRequestBody.append('refresh_token', oldRefreshToken);
+    refreshRequestBody.append('client_id', clientCredentials.client_id);
+    
+    if (clientCredentials.client_secret) {
+      refreshRequestBody.append('client_secret', clientCredentials.client_secret);
+    }
+    
+    log({
+      kind: 'upstream_refresh_request',
+      server: serverDomain,
+      client_id: clientCredentials.client_id,
+      used_refresh_token_snip: oldRefreshToken.slice(0, 8)
+    });
+    
+    try {
+      const refreshResponse = await fetch(upstreamOAuth.token_endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
+        },
+        body: refreshRequestBody.toString()
+      });
+      
+      if (!refreshResponse.ok) {
+        const errorText = await refreshResponse.text();
+        log({
+          kind: 'upstream_refresh_error',
+          server: serverDomain,
+          status: refreshResponse.status,
+          error: errorText
+        });
+        return false;
+      }
+      
+      const tokenData = await refreshResponse.json() as any;
+      
+      // Check for refresh token rotation
+      const refreshTokenRotated = tokenData.refresh_token && 
+                                tokenData.refresh_token !== oldRefreshToken;
+      
+      log({
+        kind: 'upstream_refresh_response',
+        server: serverDomain,
+        new_access_token_snip: tokenData.access_token.slice(0, 8),
+        refresh_token_rotated: refreshTokenRotated,
+        expires_in: tokenData.expires_in || 3600
+      });
+      
+      // Update tokens
+      serverData.tokens.access_token = tokenData.access_token;
+      if (tokenData.refresh_token) {
+        serverData.tokens.refresh_token = tokenData.refresh_token;
+      }
+      serverData.tokens.expires_in = tokenData.expires_in || 3600;
+      serverData.expiresAt = Date.now() + (tokenData.expires_in || 3600) * 1000;
+      
+      logSummary('refresh_token', 'POST', 200, 
+        `upstream=${serverDomain} rotated=${refreshTokenRotated}`);
+      
+      return true;
+    } catch (error) {
+      log({
+        kind: 'upstream_refresh_error',
+        server: serverDomain,
+        error: error.message
+      });
+      return false;
+    }
   }
   
+  // Use configured server
   const refreshRequestBody = new URLSearchParams();
   refreshRequestBody.append('grant_type', 'refresh_token');
-  refreshRequestBody.append('refresh_token', serverData.tokens.refresh_token);
+  refreshRequestBody.append('refresh_token', oldRefreshToken);
   refreshRequestBody.append('client_id', serverConfig.clientId);
   
   if (serverConfig.clientSecret) {
     refreshRequestBody.append('client_secret', serverConfig.clientSecret);
   }
   
+  log({
+    kind: 'upstream_refresh_request',
+    server: serverDomain,
+    client_id: serverConfig.clientId,
+    used_refresh_token_snip: oldRefreshToken.slice(0, 8)
+  });
+  
   try {
     const refreshResponse = await fetch(serverConfig.tokenEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache'
       },
       body: refreshRequestBody.toString()
     });
     
     if (!refreshResponse.ok) {
       const errorText = await refreshResponse.text();
-      console.error('Token refresh failed:', errorText);
+      log({
+        kind: 'upstream_refresh_error',
+        server: serverDomain,
+        status: refreshResponse.status,
+        error: errorText
+      });
       return false;
     }
     
     const tokenData = await refreshResponse.json() as any;
+    
+    // Check for refresh token rotation
+    const refreshTokenRotated = tokenData.refresh_token && 
+                              tokenData.refresh_token !== oldRefreshToken;
+    
+    log({
+      kind: 'upstream_refresh_response',
+      server: serverDomain,
+      new_access_token_snip: tokenData.access_token.slice(0, 8),
+      refresh_token_rotated: refreshTokenRotated,
+      expires_in: tokenData.expires_in || 3600
+    });
     
     // Update tokens
     serverData.tokens.access_token = tokenData.access_token;
@@ -1992,11 +2364,17 @@ async function refreshUpstreamToken(serverDomain: string, serverData: any, env: 
     serverData.tokens.expires_in = tokenData.expires_in || 3600;
     serverData.expiresAt = Date.now() + (tokenData.expires_in || 3600) * 1000;
     
-    console.log('Token refreshed successfully for:', serverDomain);
+    logSummary('refresh_token', 'POST', 200, 
+      `upstream=${serverDomain} rotated=${refreshTokenRotated}`);
+    
     return true;
     
-  } catch (error) {
-    console.error('Token refresh error:', error);
+  } catch (error: any) {
+    log({
+      kind: 'upstream_refresh_error',
+      server: serverDomain,
+      error: error.message
+    });
     return false;
   }
 }
@@ -2143,4 +2521,4 @@ async function sha256Base64Url(input: string): Promise<string> {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=/g, '');
-}
+}}
