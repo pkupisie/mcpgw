@@ -25,6 +25,14 @@ function sse401(reason: string = "Missing or invalid access token"): Response {
 export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
   const url = new URL(request.url);
   
+  console.log(`\n╔══ MCP REQUEST ENTRY ════════════════════════════════`);
+  console.log(`║ URL: ${url.toString()}`);
+  console.log(`║ Method: ${request.method}`);
+  console.log(`║ Path: ${url.pathname}`);
+  console.log(`║ Accept: ${request.headers.get('Accept')}`);
+  console.log(`║ Server Domain: ${hostRoute.serverDomain}`);
+  console.log(`╚══════════════════════════════════════════════════════`);
+  
   // Check for WebSocket upgrade
   const upgradeHeader = request.headers.get('Upgrade');
   if (upgradeHeader?.toLowerCase() === 'websocket') {
@@ -154,29 +162,56 @@ export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo
 }
 
 async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
+  console.log(`\n╔══ SSE ENDPOINT HIT ══════════════════════════════════`);
+  console.log(`║ Path: ${new URL(request.url).pathname}`);
+  console.log(`║ Method: ${request.method}`);
+  console.log(`║ Headers: ${JSON.stringify(Object.fromEntries(request.headers.entries()))}`);
+  
   // Get Bearer token
   const authHeader = request.headers.get('Authorization');
+  console.log(`║ Auth Header: ${authHeader ? authHeader.substring(0, 20) + '...' : 'MISSING'}`);
+  
   if (!authHeader?.startsWith('Bearer ')) {
+    console.log(`║ Result: 401 - Missing Bearer token`);
+    console.log(`╚══════════════════════════════════════════════════════`);
     return sse401("Missing or invalid access token");
   }
   
   const token = authHeader.substring(7);
+  console.log(`║ Token: ${token.substring(0, 8)}...`);
+  console.log(`║ KV Available: ${env.TOKENS ? 'YES' : 'NO'}`);
   
   // Check KV first, then memory
   let tokenData: any = null;
   
   if (env.TOKENS) {
-    const kvData = await env.TOKENS.get(`access:${token}`);
+    const kvKey = `access:${token}`;
+    console.log(`║ Checking KV for: ${kvKey.substring(0, 20)}...`);
+    const kvData = await env.TOKENS.get(kvKey);
+    console.log(`║ KV Result: ${kvData ? 'FOUND' : 'NOT FOUND'}`);
     if (kvData) {
       tokenData = JSON.parse(kvData);
+      console.log(`║ Token Data from KV: ${JSON.stringify(tokenData)}`);
     }
   }
   
   if (!tokenData) {
+    console.log(`║ Checking memory store...`);
     tokenData = accessTokens.get(token);
+    console.log(`║ Memory Result: ${tokenData ? 'FOUND' : 'NOT FOUND'}`);
+    if (tokenData) {
+      console.log(`║ Token Data from Memory: ${JSON.stringify(tokenData)}`);
+    }
+  }
+  
+  console.log(`║ Memory store size: ${accessTokens.size}`);
+  if (accessTokens.size > 0) {
+    console.log(`║ Tokens in memory: ${Array.from(accessTokens.keys()).map(t => t.substring(0, 8) + '...').join(', ')}`);
   }
   
   if (!tokenData) {
+    console.log(`║ Result: 401 - Token not found in KV or memory`);
+    console.log(`╚══════════════════════════════════════════════════════`);
     return sse401("Invalid or expired access token");
   }
   
