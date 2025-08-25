@@ -8,5 +8,11 @@
   "observability": { "enabled": true },
   "vars": {
     "DOMAIN_ROOT": "copernicusone.com"
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_CODES",
+      "id": "29d1d292ac8d4c0c852edd6c97119cba"
+    }
+  ]
 }

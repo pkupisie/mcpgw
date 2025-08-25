@@ -112,6 +112,7 @@ interface Env {
   LOCAL_USER: string;
   LOCAL_PASSWORD: string;
   MCP_SERVERS: string;
+  OAUTH_CODES: KVNamespace;
 }
 
 export default {
@@ -797,8 +798,12 @@ async function handleLocalOAuthAuthorizePost(request: Request, hostRoute: MCPRou
     expires_at: Date.now() + 600000 // 10 minutes
   };
   
-  // Store code globally for cross-session access
-  authorizationCodes.set(code, codeData);
+  // Store code in KV with TTL for automatic expiration
+  await env.OAUTH_CODES.put(
+    code,
+    JSON.stringify(codeData),
+    { expirationTtl: 600 } // 10 minutes TTL
+  );
   
   // Redirect back to client
   const redirectUrl = new URL(formData.get('redirect_uri') as string);
@@ -823,18 +828,20 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
     
     console.log(`Token request params - code: ${code?.substring(0, 8)}..., client_id: ${client_id}, redirect_uri: ${redirect_uri}`);
     
-    // Look up code in global store
-    const codeData = authorizationCodes.get(code);
+    // Look up code in KV store
+    const codeDataStr = await env.OAUTH_CODES.get(code);
     
-    if (!codeData || codeData.expires_at < Date.now()) {
-      console.log(`Code lookup failed - codeData exists: ${!!codeData}, expired: ${codeData ? codeData.expires_at < Date.now() : 'N/A'}`);
-      console.log(`Available codes (${authorizationCodes.size}): ${Array.from(authorizationCodes.keys()).map(k => k.substring(0, 8) + '...').join(', ') || 'none'}`);
+    if (!codeDataStr) {
+      console.log(`Code lookup failed - code not found in KV`);
       console.log(`Looking for: ${code?.substring(0, 8)}...`);
       return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Authorization code expired or not found' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
       });
     }
+    
+    const codeData = JSON.parse(codeDataStr);
+    console.log(`Code found in KV, client_id: ${codeData.client_id}`);
     
     // Validate client_id matches
     if (codeData.client_id !== client_id) {
@@ -852,8 +859,8 @@ async function handleLocalOAuthToken(request: Request, hostRoute: MCPRouteInfo, 
       });
     }
     
-    // Delete code after use (one-time use)
-    authorizationCodes.delete(code);
+    // Delete code from KV after use (one-time use)
+    await env.OAUTH_CODES.delete(code);
     
     // Verify PKCE if provided
     if (codeData.code_challenge && code_verifier) {
@@ -1640,9 +1647,13 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
         expires_at: Date.now() + 600000 // 10 minutes
       };
       
-      // Store code globally for cross-session access
-      authorizationCodes.set(clientCode, codeData);
-      console.log(`Stored authorization code: ${clientCode.substring(0, 8)}..., total codes now: ${authorizationCodes.size}`);
+      // Store code in KV with TTL for automatic expiration
+      await env.OAUTH_CODES.put(
+        clientCode,
+        JSON.stringify(codeData),
+        { expirationTtl: 600 } // 10 minutes TTL
+      );
+      console.log(`Stored authorization code in KV: ${clientCode.substring(0, 8)}...`);
       
       // Build redirect URL back to client
       const clientRedirectUrl = new URL(pendingAuth.redirect_uri);
