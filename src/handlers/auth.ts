@@ -8,10 +8,15 @@ import { generateRandomString } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';
 
 export function handleLoginPage(request: Request): Response {
-  const returnTo = new URL(request.url).searchParams.get('return_to') || '';
+  const url = new URL(request.url);
+  const returnTo = url.searchParams.get('return_to') || '';
+  const mergeSession = url.searchParams.get('merge_session') || '';
   
   console.log(`\n╔══ LOGIN PAGE RENDERED ══════════════════════════════`);
   console.log(`║ Return To: ${returnTo || '(none)'}`)
+  if (mergeSession) {
+    console.log(`║ Merge Session: ${mergeSession.substring(0, 8)}...`)
+  }
   console.log(`╚══════════════════════════════════════════════════════`);
   
   const html = `<!doctype html><html><body>
@@ -20,6 +25,7 @@ export function handleLoginPage(request: Request): Response {
       <label>User: <input name="user" required></label><br><br>
       <label>Pass: <input name="pass" type="password" required></label><br><br>
       <input type="hidden" name="return_to" value="${returnTo}">
+      <input type="hidden" name="merge_session" value="${mergeSession}">
       <button type="submit">Sign in</button>
     </form>
   </body></html>`;
@@ -33,7 +39,7 @@ export async function handleLogin(request: Request, env: Env): Promise<Response>
   const formData = await request.formData();
   const user = formData.get('user') as string;
   const pass = formData.get('pass') as string;
-  const url = new URL(request.url);
+  const mergeSessionId = formData.get('merge_session') as string;
   
   console.log(`\n╔══ LOGIN ATTEMPT ════════════════════════════════════`);
   console.log(`║ User: ${user}`);
@@ -45,7 +51,6 @@ export async function handleLogin(request: Request, env: Env): Promise<Response>
   }
   
   // Check if we need to merge an old session
-  const mergeSessionId = url.searchParams.get('merge_session');
   let oldSessionData: SessionData | null = null;
   if (mergeSessionId) {
     oldSessionData = await getSession(mergeSessionId, env);
