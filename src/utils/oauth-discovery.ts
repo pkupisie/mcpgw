@@ -2,6 +2,9 @@
  * OAuth discovery utilities for dynamic configuration
  */
 
+import type { Env } from '../types';
+import { getCachedOAuthConfig, saveCachedOAuthConfig } from './kv-storage';
+
 export interface OAuthDiscoveryConfig {
   issuer: string;
   authorization_endpoint: string;
@@ -14,9 +17,18 @@ export interface OAuthDiscoveryConfig {
 }
 
 /**
- * Discover OAuth configuration from upstream MCP server
+ * Discover OAuth configuration from upstream MCP server with caching
  */
-export async function discoverOAuthConfig(serverDomain: string): Promise<OAuthDiscoveryConfig | null> {
+export async function discoverOAuthConfig(serverDomain: string, env: Env): Promise<OAuthDiscoveryConfig | null> {
+  // Check cache first
+  const cachedConfig = await getCachedOAuthConfig(env, serverDomain);
+  if (cachedConfig) {
+    console.log(`Using cached OAuth config for ${serverDomain}`);
+    return cachedConfig;
+  }
+
+  console.log(`No cached config found for ${serverDomain}, discovering...`);
+  
   try {
     // Try OAuth 2.0 Authorization Server Metadata (RFC 8414)
     const metadataUrl = `https://${serverDomain}/.well-known/oauth-authorization-server`;
@@ -40,6 +52,9 @@ export async function discoverOAuthConfig(serverDomain: string): Promise<OAuthDi
       token: config.token_endpoint,
       scopes: config.scopes_supported
     });
+    
+    // Save to cache
+    await saveCachedOAuthConfig(env, serverDomain, config);
     
     return config;
   } catch (error) {

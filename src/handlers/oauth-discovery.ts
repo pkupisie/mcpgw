@@ -4,10 +4,17 @@
 
 import type { Env, MCPRouteInfo } from '../types';
 import { getCurrentDomain } from '../utils/url';
+import { discoverOAuthConfig } from '../utils/oauth-discovery';
 
 export async function handleOAuthDiscovery(request: Request, hostRoute: MCPRouteInfo, env: Env): Promise<Response> {
   const currentDomain = getCurrentDomain(request);
   const issuer = `https://${currentDomain}`;
+  
+  // Dynamically discover scopes from the upstream server
+  const upstreamConfig = await discoverOAuthConfig(hostRoute.serverDomain, env);
+  
+  // Use discovered scopes, or fallback to safe defaults if discovery fails
+  const scopes_supported = upstreamConfig?.scopes_supported || ['mcp', 'read', 'write'];
   
   const metadata = {
     issuer,
@@ -32,7 +39,7 @@ export async function handleOAuthDiscovery(request: Request, hostRoute: MCPRoute
     authorization_response_iss_parameter_supported: true,
     backchannel_logout_supported: false,
     frontchannel_logout_supported: false,
-    scopes_supported: ['mcp', 'read', 'write']
+    scopes_supported  // Use dynamically discovered scopes
   };
   
   console.log(`\n╔══ OAUTH DISCOVERY RESPONSE ═════════════════════════`);
@@ -40,6 +47,7 @@ export async function handleOAuthDiscovery(request: Request, hostRoute: MCPRoute
   console.log(`║ Authorization: ${metadata.authorization_endpoint}`);
   console.log(`║ Token: ${metadata.token_endpoint}`);
   console.log(`║ Device: ${metadata.device_authorization_endpoint}`);
+  console.log(`║ Scopes (from ${hostRoute.serverDomain}): ${scopes_supported.join(', ')}`);
   console.log(`╚══════════════════════════════════════════════════════`);
   
   return new Response(JSON.stringify(metadata), {
@@ -59,11 +67,15 @@ export async function handleProtectedResourceMetadata(request: Request, hostRout
   const currentDomain = getCurrentDomain(request);
   const resource = `https://${currentDomain}`;
   
+  // Dynamically discover scopes from the upstream server
+  const upstreamConfig = await discoverOAuthConfig(hostRoute.serverDomain, env);
+  const scopes_supported = upstreamConfig?.scopes_supported || ['mcp', 'read', 'write'];
+  
   const metadata = {
     resource,
     authorization_servers: [`https://${currentDomain}`],
     bearer_methods_supported: ['authorization_header'],
-    scopes_supported: ['mcp', 'read', 'write'],
+    scopes_supported,
     sse_endpoint: `${resource}/sse`,
     resource_documentation: `https://${currentDomain}`,
     

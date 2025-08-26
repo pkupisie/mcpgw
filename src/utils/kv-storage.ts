@@ -11,6 +11,7 @@ import type {
   RefreshToken,
   Env 
 } from '../types';
+import type { OAuthDiscoveryConfig } from './oauth-discovery';
 
 // TTL configurations (in seconds)
 const TTL_CONFIG = {
@@ -21,6 +22,7 @@ const TTL_CONFIG = {
   device_code: 900,      // 15 minutes
   user_code: 900,        // 15 minutes
   correlation: 300,      // 5 minutes
+  oauth_discovery_cache: 300, // 5 minutes
   client: null           // Never expires
 } as const;
 
@@ -33,6 +35,7 @@ const KEY_PREFIX = {
   client: 'client:',
   device_code: 'device_code:',
   user_code: 'user_code:',
+  oauth_discovery_cache: 'oauth_cache:',
   correlation: 'correlation:'
 } as const;
 
@@ -206,4 +209,16 @@ export async function saveCorrelation(env: Env, correlationId: string, value: st
 export async function deleteCorrelation(env: Env, correlationId: string): Promise<void> {
   const key = `${KEY_PREFIX.correlation}${correlationId}`;
   await kvDelete(env, key);
+}
+
+// OAuth Discovery Cache
+export async function getCachedOAuthConfig(env: Env, serverDomain: string): Promise<OAuthDiscoveryConfig | null> {
+  const key = `${KEY_PREFIX.oauth_discovery_cache}${serverDomain}`;
+  const data = await kvGet(env, key);
+  return data ? JSON.parse(data) : null;
+}
+
+export async function saveCachedOAuthConfig(env: Env, serverDomain: string, config: OAuthDiscoveryConfig): Promise<void> {
+  const key = `${KEY_PREFIX.oauth_discovery_cache}${serverDomain}`;
+  await kvPut(env, key, JSON.stringify(config), TTL_CONFIG.oauth_discovery_cache);
 }

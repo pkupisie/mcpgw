@@ -187,7 +187,7 @@ export async function initiateUpstreamOAuth(request: Request, hostRoute: MCPRout
   console.log(`║ Request Path: ${new URL(request.url).pathname}`);
   console.log(`║ Discovering OAuth configuration...`);
   
-  const oauthConfig = await discoverOAuthConfig(hostRoute.serverDomain);
+  const oauthConfig = await discoverOAuthConfig(hostRoute.serverDomain, env);
   
   if (!oauthConfig) {
     console.log(`║ Discovery failed - server may not support OAuth`);
