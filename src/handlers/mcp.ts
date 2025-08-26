@@ -41,6 +41,17 @@ export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo
   
   // Check for SSE endpoint - handle both HEAD and GET
   if (url.pathname === '/sse') {
+    // Add detailed logging for SSE authentication
+    console.log(`\n╔══ SSE AUTHENTICATION CHECK ════════════════════════`);
+    console.log(`║ Method: ${request.method}`);
+    const authHeaderForSSE = request.headers.get('Authorization');
+    console.log(`║ Authorization Header: ${authHeaderForSSE || '*** MISSING ***'}`);
+    if (authHeaderForSSE?.startsWith('Bearer ')) {
+      console.log(`║ Token: ${authHeaderForSSE.substring(7, 15)}...`);
+    }
+    console.log(`║ User-Agent: ${request.headers.get('User-Agent')}`);
+    console.log(`╚══════════════════════════════════════════════════════`);
+    
     // Handle HEAD request for /sse
     if (request.method === 'HEAD') {
       const authHeader = request.headers.get('Authorization');
