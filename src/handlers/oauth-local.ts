@@ -119,21 +119,49 @@ async function handleLocalOAuthAuthorize(request: Request, hostRoute: MCPRouteIn
   }
   
   // Check if user is authenticated with gateway
-  const sessionId = getSessionId(request);
-  const session = sessionId ? await getSession(sessionId, env) : null;
+  let sessionId = getSessionId(request);
+  let session = sessionId ? await getSession(sessionId, env) : null;
+  
+  // If no session exists, create one to store the pending auth request
+  if (!session) {
+    sessionId = generateSessionId();
+    session = { csrf: generateRandomString(16), localAuth: false, oauth: {} };
+    
+    // Store the pending client auth request
+    session.pendingClientAuth = {
+      client_id: params.get('client_id') as string,
+      redirect_uri: params.get('redirect_uri') as string,
+      scope: params.get('scope') as string,
+      state: params.get('state') as string,
+      code_challenge: params.get('code_challenge') as string,
+      code_challenge_method: params.get('code_challenge_method') as string,
+      resource: params.get('resource') as string,
+      serverDomain: hostRoute.serverDomain
+    };
+    
+    await saveSession(sessionId, session, env);
+  }
   
   // Log session status for debugging
   console.log(`║ Session Check: ${sessionId ? `Found (${sessionId.substring(0, 8)}...)` : 'Not found'}`);
   console.log(`║ Session Valid: ${session ? 'Yes' : 'No'}`);
   console.log(`║ Local Auth: ${session?.localAuth ? 'Yes' : 'No'}`)
   
-  if (!session || !session.localAuth) {
-    // Redirect to login with return URL
+  if (!session.localAuth) {
+    // Redirect to login with return URL and session to merge
     const loginUrl = new URL(`https://${getCurrentDomain(request)}/login`);
     loginUrl.searchParams.set('return_to', request.url);
+    // Pass the existing session ID to the login handler so we can merge it later
+    loginUrl.searchParams.set('merge_session', sessionId!);
     console.log(`║ Redirecting to login: ${loginUrl.toString()}`);
     console.log(`╚══════════════════════════════════════════════════════`);
-    return Response.redirect(loginUrl.toString(), 302);
+    
+    const response = Response.redirect(loginUrl.toString(), 302);
+    // If we created a new session, we need to set the cookie for the redirect
+    if (!getSessionId(request)) {
+      response.headers.set('Set-Cookie', `session=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`);
+    }
+    return response;
   }
   
   // Show authorization consent page
