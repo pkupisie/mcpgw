@@ -13,7 +13,7 @@ import { tryConnectUpstreamSSE } from './sse';
  */
 function sse401(reason: string = "Missing or invalid access token"): Response {
   const headers = {
-    "WWW-Authenticate": 'Bearer realm="mcp", scope="mcp read write"',
+    "WWW-Authenticate": `Bearer realm="OAuth", error="invalid_token", error_description="${reason}"`,
     "Content-Type": "application/json",
   };
   return new Response(JSON.stringify({
