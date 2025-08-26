@@ -68,7 +68,7 @@ MCP_SERVERS = '[
 - `npm test` - Run Playwright E2E tests
 - `npm run dev:gw` - Start Node.js gateway (alternative architecture)
 
-**IMPORTANT**: Never run `npm run deploy` manually. The application is automatically deployed via CI/CD when you push to the repository.
+**IMPORTANT**: Never run `npm run deploy` manually. The application is automatically deployed via CI/CD when you push to the repository. Always use `git commit` and `git push` to deploy changes.
 
 ### Cloudflare Setup
 1. **Set Secrets**: Configure required secrets

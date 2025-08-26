@@ -8,6 +8,7 @@ import { generateRandomString, sha256Base64Url } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';
 import { isTokenExpired } from '../utils/token';
 import { discoverOAuthConfig, registerDynamicClient } from '../utils/oauth-discovery';
+import { saveAuthCode } from '../utils/kv-storage';
 
 export async function handleOAuthStart(request: Request, env: Env): Promise<Response> {
   const sessionId = getSessionId(request);
@@ -125,6 +126,45 @@ export async function handleOAuthCallback(request: Request, env: Env): Promise<R
   // Clean up PKCE data
   delete serverData.state;
   delete serverData.pkceVerifier;
+  
+  // After successful upstream auth, check if there was a pending downstream client request
+  if (session.pendingClientAuth) {
+    console.log('Completing pending downstream client authorization');
+    const pendingAuth = session.pendingClientAuth;
+    delete session.pendingClientAuth; // Clean up immediately
+    
+    // We have upstream tokens, now we can issue an authorization code to the downstream client
+    const downstreamCode = generateRandomString(32);
+    const hostname = new URL(request.url).hostname;
+    
+    const codeData = {
+      client_id: pendingAuth.client_id,
+      redirect_uri: pendingAuth.redirect_uri,
+      scope: pendingAuth.scope,
+      code_challenge: pendingAuth.code_challenge,
+      code_challenge_method: pendingAuth.code_challenge_method,
+      resource: pendingAuth.resource,
+      serverDomain: pendingAuth.serverDomain,
+      hostname,
+      sessionId: sessionId!,
+      created_at: Date.now()
+    };
+    
+    // Store the new authorization code for the downstream client
+    await saveAuthCode(env, downstreamCode, codeData);
+    await saveSession(sessionId!, session, env); // Save the session now that pending auth is cleared
+    
+    // Redirect the user back to the downstream client's redirect_uri with the new code
+    const redirectUrl = new URL(pendingAuth.redirect_uri);
+    redirectUrl.searchParams.set('code', downstreamCode);
+    if (pendingAuth.state) {
+      redirectUrl.searchParams.set('state', pendingAuth.state);
+    }
+    redirectUrl.searchParams.set('iss', `https://${hostname}`);
+    
+    console.log(`Redirecting back to downstream client: ${redirectUrl.toString()}`);
+    return Response.redirect(redirectUrl.toString(), 302);
+  }
   
   // Save updated session to KV
   await saveSession(sessionId!, session, env);
