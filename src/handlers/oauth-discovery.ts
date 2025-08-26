@@ -64,7 +64,7 @@ export async function handleProtectedResourceMetadata(request: Request, hostRout
     authorization_servers: [`https://${currentDomain}`],
     bearer_methods_supported: ['authorization_header'],
     scopes_supported: ['mcp', 'read', 'write'],
-    sse_endpoint: '/sse',
+    sse_endpoint: `${resource}/sse`,
     resource_documentation: `https://${currentDomain}`,
     
     // Explicitly indicate that authentication is required
