@@ -3,7 +3,6 @@
  */
 
 import type { Env, SessionData } from '../types';
-import { sessions } from '../stores';
 import { generateSessionId, saveSession } from '../utils/session';
 import { generateRandomString } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';
@@ -56,16 +55,6 @@ export async function handleLogin(request: Request, env: Env): Promise<Response>
   await saveSession(sessionId, session, env);
   
   console.log(`║ Session Created: ${sessionId.substring(0, 8)}...`);
-  console.log(`║ Total Sessions in Memory: ${sessions.size}`);
-  
-  // Clean up old sessions periodically (simple memory management)
-  if (sessions.size > 1000) {
-    // Remove oldest sessions when we hit 1000
-    const entries = Array.from(sessions.entries());
-    for (let i = 0; i < 100; i++) {
-      sessions.delete(entries[i][0]);
-    }
-  }
   
   // Check for return_to parameter - it could be a full URL with query params
   const returnTo = new URL(request.url).searchParams.get('return_to') || 

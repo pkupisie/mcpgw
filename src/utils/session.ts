@@ -3,8 +3,8 @@
  */
 
 import type { SessionData, Env } from '../types';
-import { sessions } from '../stores';
 import { generateRandomString } from './crypto';
+import { getSession as kvGetSession, saveSession as kvSaveSession } from './kv-storage';
 
 // Extract session ID from request cookies
 export function getSessionId(request: Request): string | null {
@@ -22,25 +22,9 @@ export function getSessionId(request: Request): string | null {
   return cookies.session || null;
 }
 
-// Get session data from KV store or memory fallback
+// Get session data from KV store
 export async function getSession(sessionId: string, env: Env): Promise<SessionData | null> {
-  // Try KV first if available
-  if (env.SESSIONS) {
-    try {
-      const sessionStr = await env.SESSIONS.get(sessionId);
-      if (sessionStr) {
-        const session = JSON.parse(sessionStr) as SessionData;
-        // Also cache in memory for this request
-        sessions.set(sessionId, session);
-        return session;
-      }
-    } catch (error) {
-      console.error('Failed to get session from KV:', error);
-    }
-  }
-  
-  // Fallback to in-memory store
-  return sessions.get(sessionId) || null;
+  return await kvGetSession(env, sessionId);
 }
 
 // Generate new session ID
@@ -62,20 +46,7 @@ export function generateUserCode(): string {
   return generateRandomString(8).toUpperCase();
 }
 
-// Save session to KV store and memory
+// Save session to KV store
 export async function saveSession(sessionId: string, session: SessionData, env: Env): Promise<void> {
-  // Save to memory first
-  sessions.set(sessionId, session);
-  
-  // Save to KV if available
-  if (env.SESSIONS) {
-    try {
-      // Store with 8 hour TTL (28800 seconds)
-      await env.SESSIONS.put(sessionId, JSON.stringify(session), {
-        expirationTtl: 28800
-      });
-    } catch (error) {
-      console.error('Failed to save session to KV:', error);
-    }
-  }
+  await kvSaveSession(env, sessionId, session);
 }

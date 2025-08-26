@@ -3,7 +3,7 @@
  */
 
 import type { Env, MCPRouteInfo } from '../types';
-import { accessTokens } from '../stores';
+import { getAccessToken } from '../utils/kv-storage';
 import { getSession } from '../utils/session';
 import { isTokenExpired, refreshUpstreamToken } from '../utils/token';
 import { tryConnectUpstreamSSE } from './sse';
@@ -65,19 +65,8 @@ export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo
   
   const token = authHeader.substring(7);
   
-  // Check KV first, then memory
-  let tokenData: any = null;
-  
-  if (env.TOKENS) {
-    const kvData = await env.TOKENS.get(`access:${token}`);
-    if (kvData) {
-      tokenData = JSON.parse(kvData);
-    }
-  }
-  
-  if (!tokenData) {
-    tokenData = accessTokens.get(token);
-  }
+  // Get access token from KV
+  const tokenData = await getAccessToken(env, token);
   
   if (!tokenData) {
     console.log('Invalid or expired access token');
@@ -88,10 +77,7 @@ export async function handleMCPRequest(request: Request, hostRoute: MCPRouteInfo
   const isExpired = Date.now() - tokenData.created_at > 3600000;
   if (isExpired) {
     console.log('Access token expired');
-    if (env.TOKENS) {
-      await env.TOKENS.delete(`access:${token}`);
-    }
-    accessTokens.delete(token);
+    // Note: Token will be auto-deleted by KV TTL
     return sse401('Access token expired');
   }
   
@@ -179,35 +165,16 @@ async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env)
   
   const token = authHeader.substring(7);
   console.log(`║ Token: ${token.substring(0, 8)}...`);
-  console.log(`║ KV Available: ${env.TOKENS ? 'YES' : 'NO'}`);
+  console.log(`║ KV Available: ${env.MCPGW ? 'YES' : 'NO'}`);
   
-  // Check KV first, then memory
-  let tokenData: any = null;
-  
-  if (env.TOKENS) {
-    const kvKey = `access:${token}`;
-    console.log(`║ Checking KV for: ${kvKey.substring(0, 20)}...`);
-    const kvData = await env.TOKENS.get(kvKey);
-    console.log(`║ KV Result: ${kvData ? 'FOUND' : 'NOT FOUND'}`);
-    if (kvData) {
-      tokenData = JSON.parse(kvData);
-      console.log(`║ Token Data from KV: ${JSON.stringify(tokenData)}`);
-    }
+  // Get access token from KV
+  const tokenData = await getAccessToken(env, token);
+  console.log(`║ Token Result: ${tokenData ? 'FOUND' : 'NOT FOUND'}`);
+  if (tokenData) {
+    console.log(`║ Token Client: ${tokenData.client_id}`);
   }
   
-  if (!tokenData) {
-    console.log(`║ Checking memory store...`);
-    tokenData = accessTokens.get(token);
-    console.log(`║ Memory Result: ${tokenData ? 'FOUND' : 'NOT FOUND'}`);
-    if (tokenData) {
-      console.log(`║ Token Data from Memory: ${JSON.stringify(tokenData)}`);
-    }
-  }
-  
-  console.log(`║ Memory store size: ${accessTokens.size}`);
-  if (accessTokens.size > 0) {
-    console.log(`║ Tokens in memory: ${Array.from(accessTokens.keys()).map(t => t.substring(0, 8) + '...').join(', ')}`);
-  }
+  console.log(`║ Token lookup from KV`);
   
   if (!tokenData) {
     console.log(`║ Result: 401 - Token not found in KV or memory`);
@@ -218,10 +185,7 @@ async function handleMCPSSE(request: Request, hostRoute: MCPRouteInfo, env: Env)
   // Check if token is expired
   const isExpired = Date.now() - tokenData.created_at > 3600000;
   if (isExpired) {
-    if (env.TOKENS) {
-      await env.TOKENS.delete(`access:${token}`);
-    }
-    accessTokens.delete(token);
+    // Note: Token will be auto-deleted by KV TTL
     return sse401("Access token expired");
   }
   
@@ -292,19 +256,8 @@ async function handleWebSocketUpgrade(request: Request, hostRoute: MCPRouteInfo,
   
   const token = authHeader.substring(7);
   
-  // Check KV first, then memory
-  let tokenData: any = null;
-  
-  if (env.TOKENS) {
-    const kvData = await env.TOKENS.get(`access:${token}`);
-    if (kvData) {
-      tokenData = JSON.parse(kvData);
-    }
-  }
-  
-  if (!tokenData) {
-    tokenData = accessTokens.get(token);
-  }
+  // Get access token from KV
+  const tokenData = await getAccessToken(env, token);
   
   if (!tokenData) {
     return sse401('Invalid or expired access token');
@@ -313,10 +266,7 @@ async function handleWebSocketUpgrade(request: Request, hostRoute: MCPRouteInfo,
   // Check if token is expired
   const isExpired = Date.now() - tokenData.created_at > 3600000;
   if (isExpired) {
-    if (env.TOKENS) {
-      await env.TOKENS.delete(`access:${token}`);
-    }
-    accessTokens.delete(token);
+    // Note: Token will be auto-deleted by KV TTL
     return sse401('Access token expired');
   }
   

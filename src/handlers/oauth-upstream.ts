@@ -3,7 +3,6 @@
  */
 
 import type { Env, MCPRouteInfo, SessionData } from '../types';
-import { sessions } from '../stores';
 import { getSessionId, getSession, saveSession } from '../utils/session';
 import { generateRandomString, sha256Base64Url } from '../utils/crypto';
 import { getCurrentDomain } from '../utils/url';

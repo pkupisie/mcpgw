@@ -20,7 +20,7 @@ Claude.ai/ChatGPT → Cloudflare Worker → MCP Server (Atlassian/GitHub/etc)
 ### Deployment: Cloudflare Worker
 - **Production**: Single Worker handling all traffic  
 - **Zero-config scaling**: Cloudflare's global edge network
-- **In-memory sessions**: Ephemeral but simple (resets on worker restart)
+- **KV Storage**: Persistent storage using Cloudflare KV (single unified namespace)
 - **Multi-domain support**: Works on both custom domain and *.workers.dev
 
 ### Hostname-Based MCP Server Routing
@@ -65,9 +65,10 @@ MCP_SERVERS = '[
 ### Development & Testing
 - `npm run dev` - Start local development server with Wrangler
 - `npm run build:worker` - Build TypeScript to JavaScript
-- `npm run deploy` - Build and deploy to Cloudflare
 - `npm test` - Run Playwright E2E tests
 - `npm run dev:gw` - Start Node.js gateway (alternative architecture)
+
+**IMPORTANT**: Never run `npm run deploy` manually. The application is automatically deployed via CI/CD when you push to the repository.
 
 ### Cloudflare Setup
 1. **Set Secrets**: Configure required secrets

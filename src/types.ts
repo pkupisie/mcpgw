@@ -109,7 +109,5 @@ export interface Env {
   DOMAIN_ROOT: string;
   LOCAL_USER: string;
   LOCAL_PASSWORD: string;
-  OAUTH_CODES: KVNamespace;
-  SESSIONS: KVNamespace;
-  TOKENS: KVNamespace;
+  MCPGW: KVNamespace;  // Single unified KV namespace
 }
